@@ -74,7 +74,7 @@ QUIZ_QUESTIONS = [
 
 # --- БАЗА ---
 def db_init():
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -111,8 +111,18 @@ def db_init():
     con.commit()
     con.close()
 
+def _db():
+    # WAL + большой timeout против database is locked
+    con = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False, isolation_level=None)
+    try:
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA busy_timeout=30000;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+    except: pass
+    return con
+
 def db_upsert_user(user):
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
     now = datetime.now().isoformat()
@@ -126,15 +136,27 @@ def db_upsert_user(user):
     con.close()
 
 def db_add_points(user_id, delta, game_inc=1, win_inc=0):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("UPDATE users SET points=points+?, games_played=games_played+?, wins=wins+? WHERE user_id=?",
-                (delta, game_inc, win_inc, user_id))
-    con.commit()
-    con.close()
+    for attempt in range(5):
+        try:
+            con = _db()
+            cur = con.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("UPDATE users SET points=points+?, games_played=games_played+?, wins=wins+? WHERE user_id=?",
+                        (delta, game_inc, win_inc, user_id))
+            con.commit()
+            con.close()
+            return
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < 4:
+                import time; time.sleep(0.2*(attempt+1))
+                continue
+            raise
+        finally:
+            try: con.close()
+            except: pass
 
 def db_get_user(user_id):
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("SELECT user_id, username, first_name, points, games_played, wins, last_daily FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
@@ -142,7 +164,7 @@ def db_get_user(user_id):
     return row
 
 def db_top(limit=10):
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("SELECT username, first_name, points, wins, games_played FROM users ORDER BY points DESC LIMIT ?", (limit,))
     rows = cur.fetchall()
@@ -150,7 +172,7 @@ def db_top(limit=10):
     return rows
 
 def db_get_points(user_id):
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("SELECT points FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
@@ -158,17 +180,25 @@ def db_get_points(user_id):
     return row[0] if row else 0
 
 def db_create_order(user_id, gift):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("INSERT INTO shop_orders (user_id, gift_id, gift_name, stars, cost_points, status, created_at) VALUES (?,?,?,?,?,?,?)",
-                (user_id, gift["gift_id"], gift["name"], gift["stars"], gift["points"], "pending", datetime.now().isoformat()))
-    oid = cur.lastrowid
-    con.commit()
-    con.close()
-    return oid
+    for attempt in range(5):
+        try:
+            con = _db()
+            cur = con.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("INSERT INTO shop_orders (user_id, gift_id, gift_name, stars, cost_points, status, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (user_id, gift["gift_id"], gift["name"], gift["stars"], gift["points"], "pending", datetime.now().isoformat()))
+            oid = cur.lastrowid
+            con.commit()
+            con.close()
+            return oid
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < 4:
+                import time; time.sleep(0.2*(attempt+1))
+                continue
+            raise
 
 def db_get_orders(user_id=None, status=None, limit=20):
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     q = "SELECT id, user_id, gift_name, stars, cost_points, status, created_at FROM shop_orders"
     params = []
@@ -419,7 +449,7 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(text)
         return
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("UPDATE users SET points=points+50, last_daily=? WHERE user_id=?", (datetime.now().isoformat(), user.id))
     con.commit()
@@ -473,19 +503,46 @@ async def handle_shop_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, gi
     if pts < gift["points"]:
         await update.callback_query.answer(f"Не хватает поинтов! Нужно {gift['points']}, у тебя {pts}", show_alert=True)
         return
-    # списываем поинты
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("UPDATE users SET points=points-? WHERE user_id=?", (gift["points"], user.id))
-    oid = db_create_order(user.id, gift)
-    con.commit()
-    con.close()
+    # списываем поинты + создаем заказ атомарно в одной транзакции (фикс database is locked)
+    oid = None
+    for attempt in range(5):
+        try:
+            con = _db()
+            cur = con.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            # повторная проверка баланса внутри транзакции
+            cur.execute("SELECT points FROM users WHERE user_id=?", (user.id,))
+            row = cur.fetchone()
+            cur_pts = row[0] if row else 0
+            if cur_pts < gift["points"]:
+                con.rollback()
+                con.close()
+                await update.callback_query.answer(f"Не хватает поинтов! Нужно {gift['points']}, у тебя {cur_pts}", show_alert=True)
+                return
+            cur.execute("UPDATE users SET points=points-? WHERE user_id=?", (gift["points"], user.id))
+            cur.execute("INSERT INTO shop_orders (user_id, gift_id, gift_name, stars, cost_points, status, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (user.id, gift["gift_id"], gift["name"], gift["stars"], gift["points"], "pending", datetime.now().isoformat()))
+            oid = cur.lastrowid
+            con.commit()
+            con.close()
+            break
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e) and attempt < 4:
+                import time; time.sleep(0.2*(attempt+1))
+                continue
+            raise
+        finally:
+            try: con.close()
+            except: pass
+    if oid is None:
+        await update.callback_query.answer("Ошибка базы, попробуй еще раз", show_alert=True)
+        return
     # пробуем отправить подарок
     try:
         bot_stars = await get_bot_stars(context.bot)
         if bot_stars < gift["stars"]:
             # не хватает звезд у бота - ставим в ожидание админа
-            con = sqlite3.connect(DB_PATH)
+            con = _db()
             cur = con.cursor()
             cur.execute("UPDATE shop_orders SET status='waiting_refill' WHERE id=?", (oid,))
             con.commit()
@@ -505,7 +562,7 @@ async def handle_shop_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, gi
             return
         # отправляем подарок
         await send_gift_raw(context.bot, chat_id=user.id, gift_id=gift["gift_id"])
-        con = sqlite3.connect(DB_PATH)
+        con = _db()
         cur = con.cursor()
         cur.execute("UPDATE shop_orders SET status='sent' WHERE id=?", (oid,))
         con.commit()
@@ -519,7 +576,7 @@ async def handle_shop_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, gi
     except Exception as e:
         log.exception(f"Gift send failed: {e}")
         # возвращаем поинты если ошибка
-        con = sqlite3.connect(DB_PATH)
+        con = _db()
         cur = con.cursor()
         cur.execute("UPDATE users SET points=points+? WHERE user_id=?", (gift["points"], user.id))
         cur.execute("UPDATE shop_orders SET status='failed' WHERE id=?", (oid,))
@@ -542,7 +599,7 @@ async def handle_buy_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, st
         payload = f"buy_{pack['stars']}_{pack['points']}_{update.effective_user.id}_{int(datetime.now().timestamp())}"
         prices = [LabeledPrice(label=title, amount=pack["stars"])]
         # сохраняем покупку в pending
-        con = sqlite3.connect(DB_PATH)
+        con = _db()
         cur = con.cursor()
         cur.execute("INSERT INTO star_purchases (user_id, stars, points, payload, status, created_at) VALUES (?,?,?,?,?,?)",
                     (update.effective_user.id, pack["stars"], pack["points"], payload, "pending", datetime.now().isoformat()))
@@ -587,7 +644,7 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
             # начисляем поинты
             db_add_points(user.id, points, game_inc=0, win_inc=0)
             # обновляем покупку
-            con = sqlite3.connect(DB_PATH)
+            con = _db()
             cur = con.cursor()
             cur.execute("UPDATE star_purchases SET status='paid' WHERE payload=?", (payload,))
             con.commit()
@@ -615,7 +672,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Только для админа")
         return
     # статистика
-    con = sqlite3.connect(DB_PATH)
+    con = _db()
     cur = con.cursor()
     cur.execute("SELECT count(*), sum(points) FROM users")
     u_cnt, tot_pts = cur.fetchone()
