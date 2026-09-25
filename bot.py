@@ -19,13 +19,27 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
+    MessageHandler, ContextTypes, filters, PreCheckoutQueryHandler
 )
+try:
+    from shop_config import SHOP_GIFTS, POINTS_PACKAGES, ADMIN_IDS
+except ImportError:
+    SHOP_GIFTS = [
+        {"gift_id": "5170145012310081615", "emoji": "💝", "name": "Сердечко", "stars": 15, "points": 500},
+        {"gift_id": "5170250947678437525", "emoji": "🎁", "name": "Подарок", "stars": 25, "points": 900},
+        {"gift_id": "5170144170496491616", "emoji": "🎂", "name": "Тортик", "stars": 50, "points": 1800},
+        {"gift_id": "5168043875654172773", "emoji": "🏆", "name": "Кубок", "stars": 100, "points": 3800},
+    ]
+    POINTS_PACKAGES = [
+        {"stars": 25, "points": 1000, "title": "1000 поинтов", "label": "⭐ 25 — 1000 points"},
+        {"stars": 100, "points": 5000, "title": "5000 поинтов", "label": "⭐ 100 — 5000 points"},
+    ]
+    ADMIN_IDS = [8206258615]
 
 # --- CONFIG ---
 load_dotenv()
@@ -73,6 +87,27 @@ def db_init():
         last_daily TEXT,
         created_at TEXT
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shop_orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        gift_id TEXT,
+        gift_name TEXT,
+        stars INTEGER,
+        cost_points INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS star_purchases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        stars INTEGER,
+        points INTEGER,
+        payload TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    )""")
     con.commit()
     con.close()
 
@@ -114,12 +149,92 @@ def db_top(limit=10):
     con.close()
     return rows
 
+def db_get_points(user_id):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT points FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    con.close()
+    return row[0] if row else 0
+
+def db_create_order(user_id, gift):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("INSERT INTO shop_orders (user_id, gift_id, gift_name, stars, cost_points, status, created_at) VALUES (?,?,?,?,?,?,?)",
+                (user_id, gift["gift_id"], gift["name"], gift["stars"], gift["points"], "pending", datetime.now().isoformat()))
+    oid = cur.lastrowid
+    con.commit()
+    con.close()
+    return oid
+
+def db_get_orders(user_id=None, status=None, limit=20):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    q = "SELECT id, user_id, gift_name, stars, cost_points, status, created_at FROM shop_orders"
+    params = []
+    wh = []
+    if user_id:
+        wh.append("user_id=?"); params.append(user_id)
+    if status:
+        wh.append("status=?"); params.append(status)
+    if wh:
+        q += " WHERE " + " AND ".join(wh)
+    q += " ORDER BY id DESC LIMIT ?"; params.append(limit)
+    cur.execute(q, tuple(params))
+    rows = cur.fetchall()
+    con.close()
+    return rows
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
+
+# --- Хелперы для Stars/Gifts (совместимость с PTB 21.6 — делаем raw API) ---
+async def get_bot_stars(bot):
+    # пробуем PTB метод, если есть, иначе raw
+    try:
+        if hasattr(bot, 'get_my_star_balance'):
+            bal = await bot.get_my_star_balance()
+            return getattr(bal, 'amount', 0)
+        if hasattr(bot, 'getMyStarBalance'):
+            bal = await bot.getMyStarBalance()
+            return getattr(bal, 'amount', 0)
+    except:
+        pass
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{TOKEN}/getMyStarBalance") as r:
+                j = await r.json()
+                if j.get("ok"):
+                    return j["result"].get("amount", 0)
+    except Exception as e:
+        log.warning(f"getMyStarBalance failed: {e}")
+    return 0
+
+async def send_gift_raw(bot, chat_id, gift_id):
+    # пробуем PTB метод
+    try:
+        if hasattr(bot, 'send_gift'):
+            return await bot.send_gift(chat_id=chat_id, gift_id=gift_id)
+        if hasattr(bot, 'sendGift'):
+            return await bot.sendGift(chat_id=chat_id, gift_id=gift_id)
+    except Exception as e:
+        log.warning(f"PTB send_gift failed, fallback raw: {e}")
+    # fallback raw
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{TOKEN}/sendGift", data={"chat_id": str(chat_id), "gift_id": gift_id}) as r:
+            j = await r.json()
+            if not j.get("ok"):
+                raise Exception(j.get("description", "sendGift failed"))
+            return j["result"]
+
 # --- КЛАВИАТУРЫ ---
 def main_menu_kb():
     kb = [
         [KeyboardButton("🎮 Игры"), KeyboardButton("👤 Профиль")],
         [KeyboardButton("🏆 Топ"), KeyboardButton("🎁 Бонус")],
-        [KeyboardButton("ℹ️ Помощь")]
+        [KeyboardButton("🎁 Магазин"), KeyboardButton("ℹ️ Помощь")]
     ]
     return ReplyKeyboardMarkup(kb, resize_keyboard=True)
 
@@ -131,10 +246,27 @@ def games_inline_kb():
          InlineKeyboardButton("🪙 Орёл и Решка", callback_data="game_coin")],
         [InlineKeyboardButton("🎰 Слоты", callback_data="game_slots"),
          InlineKeyboardButton("🎯 Дартс / Кубик", callback_data="game_dice")],
-        [InlineKeyboardButton("🏆 Рейтинг", callback_data="top"),
-         InlineKeyboardButton("👤 Профиль", callback_data="profile")]
+        [InlineKeyboardButton("🎁 Магазин", callback_data="shop"),
+         InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
+        [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
+         InlineKeyboardButton("💎 Купить поинты", callback_data="buy_points")]
     ]
     return InlineKeyboardMarkup(kb)
+
+def shop_kb():
+    rows = []
+    for g in SHOP_GIFTS:
+        rows.append([InlineKeyboardButton(f"{g['emoji']} {g['name']} — {g['points']} pts ({g['stars']} ⭐)", callback_data=f"shop_buy_{g['gift_id']}")])
+    rows.append([InlineKeyboardButton("💎 Купить поинты за ⭐", callback_data="buy_points")])
+    rows.append([InlineKeyboardButton("👤 Мой баланс", callback_data="profile"), InlineKeyboardButton("⬅️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(rows)
+
+def buy_points_kb():
+    rows = []
+    for p in POINTS_PACKAGES:
+        rows.append([InlineKeyboardButton(p["label"], callback_data=f"buy_pack_{p['stars']}")])
+    rows.append([InlineKeyboardButton("⬅️ В магазин", callback_data="shop")])
+    return InlineKeyboardMarkup(rows)
 
 def rps_kb():
     return InlineKeyboardMarkup([
@@ -177,12 +309,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎰 <b>Слоты</b> — крути барабан\n"
         f"🎯 <b>Кубик / Дартс / Баскет</b> — Telegram Dice\n\n"
         f"💰 За победы даю <b>поинты</b> — они идут в рейтинг.\n"
+        f"🎁 Магазин: меняй поинты на <b>Stars и подарки Telegram</b> в /shop!\n"
+        f"💎 Не хватает? Купи поинты за ⭐ в /buy\n"
         f"🎁 Не забудь забрать <b>ежедневный бонус</b>!\n\n"
         f"Жми кнопку ниже, чтобы начать:"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML,
                                     reply_markup=main_menu_kb())
-    await update.message.reply_text("🎮 Выбери игру:", reply_markup=games_inline_kb())
+    await update.message.reply_text("🎮 Выбери игру или загляни в магазин:", reply_markup=games_inline_kb())
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎮 Главное меню — выбирай игру:", reply_markup=games_inline_kb())
@@ -193,15 +327,20 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>Команды:</b>\n"
         "/start — приветствие и меню\n"
         "/menu — список игр\n"
-        "/games — то же, что меню\n"
+        "/shop — 🎁 магазин подарков за поинты\n"
+        "/buy — 💎 купить поинты за Stars\n"
         "/profile — твой профиль и поинты\n"
         "/top — топ-10 игроков\n"
         "/bonus — ежедневный бонус +50\n"
-        "/help — эта справка\n\n"
+        "/help — эта справка\n"
+        "/admin — 👑 админка (только для админа)\n\n"
         "<b>Как играть:</b>\n"
         "• Просто жми кнопки. В «Угадай число» пиши число в чат.\n"
         "• В викторине выбирай вариант ответа.\n"
         "• Поинты начисляются автоматически и сохраняются.\n\n"
+        "<b>Монетизация:</b>\n"
+        "• Выигрывай поинты в играх → меняй в /shop на подарки Telegram (15-100 ⭐)\n"
+        "• Не хватает поинтов? Купи в /buy за Stars — Stars идут админу\n\n"
         "<b>Админка BotFather:</b>\n"
         "Не забудь настроить описание, аватар и команды в @BotFather.\n"
         "Если токен утек — /revoke там же.\n"
@@ -292,6 +431,238 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+# --- МАГАЗИН И МОНЕТИЗАЦИЯ ---
+async def shop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db_upsert_user(user)
+    pts = db_get_points(user.id)
+    # баланс звезд бота
+    bot_stars = await get_bot_stars(context.bot)
+    text = (
+        f"🎁 <b>Магазин подарков</b> — меняй поинты на Stars и подарки!\n"
+        f"💰 Твои поинты: <b>{pts}</b>\n"
+        f"🤖 Баланс бота: {bot_stars} ⭐ (для отправки подарков)\n\n"
+        f"Выбирай подарок — я отправлю его тебе прямо в Telegram!\n"
+        f"<i>Подарки стоят Stars, но ты платишь поинтами. Я покрываю Stars из баланса (пополняется когда игроки покупают поинты).</i>\n"
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=shop_kb())
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=shop_kb())
+
+async def buy_points_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "💎 <b>Купить поинты за Stars</b>\n"
+        "Не хватает поинтов на подарок? Купи их за Telegram Stars!\n"
+        "Stars спишутся с твоего баланса, а поинты придут мгновенно.\n\n"
+        "Выбери пакет:"
+    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=buy_points_kb())
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=buy_points_kb())
+
+async def handle_shop_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, gift_id: str):
+    user = update.effective_user
+    gift = next((g for g in SHOP_GIFTS if g["gift_id"] == gift_id), None)
+    if not gift:
+        await update.callback_query.answer("Подарок не найден", show_alert=True)
+        return
+    pts = db_get_points(user.id)
+    if pts < gift["points"]:
+        await update.callback_query.answer(f"Не хватает поинтов! Нужно {gift['points']}, у тебя {pts}", show_alert=True)
+        return
+    # списываем поинты
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("UPDATE users SET points=points-? WHERE user_id=?", (gift["points"], user.id))
+    oid = db_create_order(user.id, gift)
+    con.commit()
+    con.close()
+    # пробуем отправить подарок
+    try:
+        bot_stars = await get_bot_stars(context.bot)
+        if bot_stars < gift["stars"]:
+            # не хватает звезд у бота - ставим в ожидание админа
+            con = sqlite3.connect(DB_PATH)
+            cur = con.cursor()
+            cur.execute("UPDATE shop_orders SET status='waiting_refill' WHERE id=?", (oid,))
+            con.commit()
+            con.close()
+            await update.callback_query.edit_message_text(
+                f"⏳ <b>Заказ принят!</b> {gift['emoji']} {gift['name']} ({gift['stars']} ⭐) за <b>{gift['points']} pts</b>\n\n"
+                f"У бота пока не хватает Stars ({bot_stars}/{gift['stars']}) — админ пополнит баланс и твой подарок улетит! 🎁\n"
+                f"Заказ #{oid} — статус: ожидание.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 В магазин", callback_data="shop"), InlineKeyboardButton("👤 Профиль", callback_data="profile")]])
+            )
+            # уведомляем админа
+            for aid in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(aid, f"⚠️ Новый заказ #{oid}: @{user.username or user.first_name} хочет {gift['emoji']} {gift['name']} за {gift['points']} pts. Баланс бота {bot_stars} ⭐, нужно {gift['stars']} ⭐. Пополни /admin")
+                except: pass
+            return
+        # отправляем подарок
+        await send_gift_raw(context.bot, chat_id=user.id, gift_id=gift["gift_id"])
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("UPDATE shop_orders SET status='sent' WHERE id=?", (oid,))
+        con.commit()
+        con.close()
+        await update.callback_query.edit_message_text(
+            f"🎉 <b>Подарок отправлен!</b> {gift['emoji']} {gift['name']} ({gift['stars']} ⭐) уже у тебя в Telegram!\n"
+            f"Списано <b>{gift['points']} поинтов</b>. Заказ #{oid}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Еще подарок", callback_data="shop"), InlineKeyboardButton("🏆 Топ", callback_data="top")]])
+        )
+    except Exception as e:
+        log.exception(f"Gift send failed: {e}")
+        # возвращаем поинты если ошибка
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("UPDATE users SET points=points+? WHERE user_id=?", (gift["points"], user.id))
+        cur.execute("UPDATE shop_orders SET status='failed' WHERE id=?", (oid,))
+        con.commit()
+        con.close()
+        await update.callback_query.edit_message_text(
+            f"❌ Не удалось отправить подарок: {e}\nПоинты возвращены. Попробуй позже или напиши админу.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Магазин", callback_data="shop")]])
+        )
+
+async def handle_buy_pack(update: Update, context: ContextTypes.DEFAULT_TYPE, stars: int):
+    pack = next((p for p in POINTS_PACKAGES if p["stars"] == stars), None)
+    if not pack:
+        await update.callback_query.answer("Пакет не найден")
+        return
+    # создаем инвойс на Stars
+    try:
+        title = pack["title"]
+        desc = f"Покупка {pack['points']} поинтов для Gamebot @Gamusonbot. Поинты можно обменять на подарки в /shop"
+        payload = f"buy_{pack['stars']}_{pack['points']}_{update.effective_user.id}_{int(datetime.now().timestamp())}"
+        prices = [LabeledPrice(label=title, amount=pack["stars"])]
+        # сохраняем покупку в pending
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("INSERT INTO star_purchases (user_id, stars, points, payload, status, created_at) VALUES (?,?,?,?,?,?)",
+                    (update.effective_user.id, pack["stars"], pack["points"], payload, "pending", datetime.now().isoformat()))
+        con.commit()
+        con.close()
+        # для Stars provider_token не нужен (пустая строка)
+        invoice_link = await context.bot.create_invoice_link(
+            title=title,
+            description=desc,
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=prices
+        )
+        await update.callback_query.edit_message_text(
+            f"💎 <b>{title}</b> за <b>{pack['stars']} ⭐</b>\n"
+            f"Получишь <b>{pack['points']} поинтов</b> мгновенно после оплаты!\n\n"
+            f"Нажми кнопку ниже чтобы оплатить:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"💳 Оплатить {pack['stars']} ⭐", url=invoice_link)], [InlineKeyboardButton("⬅️ Назад", callback_data="buy_points")]])
+        )
+    except Exception as e:
+        log.exception(f"Invoice failed: {e}")
+        await update.callback_query.answer(f"Ошибка создания счета: {e}", show_alert=True)
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.pre_checkout_query
+    # всегда подтверждаем для Stars
+    await q.answer(ok=True)
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pay = update.message.successful_payment
+    payload = pay.invoice_payload
+    stars = pay.total_amount  # для XTR это кол-во звезд
+    user = update.effective_user
+    # парсим payload: buy_25_1000_userid_ts
+    try:
+        parts = payload.split("_")
+        if parts[0] == "buy":
+            points = int(parts[2])
+            # для безопасности берем stars из платежа
+            # начисляем поинты
+            db_add_points(user.id, points, game_inc=0, win_inc=0)
+            # обновляем покупку
+            con = sqlite3.connect(DB_PATH)
+            cur = con.cursor()
+            cur.execute("UPDATE star_purchases SET status='paid' WHERE payload=?", (payload,))
+            con.commit()
+            con.close()
+            await update.message.reply_text(
+                f"✅ <b>Оплата прошла!</b> Зачислено <b>{points} поинтов</b> за {stars} ⭐\n"
+                f"Теперь можешь обменять их на подарки в /shop 🎁",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎁 В магазин", callback_data="shop"), InlineKeyboardButton("👤 Профиль", callback_data="profile")]])
+            )
+            # уведомляем админа о доходе
+            for aid in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(aid, f"💰 Продажа: @{user.username or user.first_name} купил {points} pts за {stars} ⭐ (payload {payload})")
+                except: pass
+            return
+    except Exception as e:
+        log.exception(f"Payment handling failed: {e}")
+    # fallback
+    await update.message.reply_text(f"✅ Платеж получен: {pay.total_amount} {pay.currency}. Спасибо!")
+
+async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not is_admin(user.id):
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    # статистика
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT count(*), sum(points) FROM users")
+    u_cnt, tot_pts = cur.fetchone()
+    cur.execute("SELECT count(*) FROM shop_orders WHERE status='pending' OR status='waiting_refill'")
+    pending = cur.fetchone()[0]
+    cur.execute("SELECT count(*), sum(stars) FROM star_purchases WHERE status='paid'")
+    sales_cnt, sales_stars = cur.fetchone()
+    con.close()
+    bot_stars = await get_bot_stars(context.bot)
+    if bot_stars == 0:
+        # попробуем еще раз, если 0 — может реально 0
+        pass
+    text = (
+        f"👑 <b>Админка</b>\n"
+        f"👥 Пользователей: {u_cnt}, всего поинтов: {tot_pts}\n"
+        f"🎁 Ожидают подарков: {pending}\n"
+        f"💎 Продано пакетов: {sales_cnt or 0}, доход Stars: {sales_stars or 0} ⭐\n"
+        f"🤖 Баланс бота: {bot_stars} ⭐\n\n"
+        f"Команды:\n"
+        f"/admin - эта панель\n"
+        f"/shop - магазин\n"
+        f"Также для теста: <code>/give 12345 100</code> - выдать поинты\n"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎁 Ожидающие заказы", callback_data="admin_pending")],
+        [InlineKeyboardButton("📊 Топ", callback_data="top"), InlineKeyboardButton("🎁 Магазин", callback_data="shop")]
+    ])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def admin_give_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    # формат: /give user_id points
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /give <user_id> <points>")
+        return
+    try:
+        uid = int(args[0]); pts = int(args[1])
+        db_add_points(uid, pts, game_inc=0, win_inc=0)
+        await update.message.reply_text(f"✅ Выдал {pts} поинтов юзеру {uid}")
+        try:
+            await context.bot.send_message(uid, f"🎁 Админ начислил тебе <b>{pts} поинтов</b>!", parse_mode=ParseMode.HTML)
+        except: pass
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
 
 # --- ИГРЫ: УГАДАЙ ЧИСЛО ---
 async def start_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,6 +915,38 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await top_cmd(update, context)
     elif data == "bonus":
         await bonus_cmd(update, context)
+    elif data == "shop":
+        await shop_cmd(update, context)
+    elif data == "buy_points":
+        await buy_points_cmd(update, context)
+    elif data.startswith("shop_buy_"):
+        gift_id = data.replace("shop_buy_", "")
+        await handle_shop_buy(update, context, gift_id)
+    elif data.startswith("buy_pack_"):
+        stars = int(data.replace("buy_pack_", ""))
+        await handle_buy_pack(update, context, stars)
+    elif data == "admin_pending":
+        if not is_admin(update.effective_user.id):
+            await q.answer("⛔ Только для админа", show_alert=True)
+            return
+        rows = db_get_orders(status="waiting_refill", limit=10)
+        if not rows:
+            rows = db_get_orders(status="pending", limit=10)
+        if not rows:
+            await q.edit_message_text("📦 Нет ожидающих заказов", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Админка", callback_data="admin_back")]]))
+        else:
+            txt = "📦 <b>Ожидающие заказы:</b>\n"
+            for oid, uid, gname, stars, pts, st, created in rows:
+                txt += f"#{oid} uid:{uid} {gname} {stars}⭐ за {pts}pts — {st}\n"
+            await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Админка", callback_data="admin_back")]]))
+    elif data == "admin_back":
+        # вернуть админку через сообщение
+        await q.answer()
+        # отправим новую админку как сообщение
+        try:
+            await admin_cmd(update, context)
+        except:
+            await q.edit_message_text("👑 Админка", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 Заказы", callback_data="admin_pending")]]))
     elif data == "game_guess":
         await start_guess(update, context)
     elif data == "game_rps":
@@ -587,6 +990,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await top_cmd(update, context)
     elif txt == "🎁 Бонус":
         await bonus_cmd(update, context)
+    elif txt == "🎁 Магазин":
+        await shop_cmd(update, context)
     elif txt == "ℹ️ Помощь":
         await help_cmd(update, context)
     elif re.fullmatch(r"-?\d+", txt) and not context.user_data.get("guess_active"):
@@ -660,6 +1065,13 @@ def main():
     app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
     app.add_handler(CommandHandler("bonus", bonus_cmd))
+    app.add_handler(CommandHandler("shop", shop_cmd))
+    app.add_handler(CommandHandler("buy", buy_points_cmd))
+    app.add_handler(CommandHandler("admin", admin_cmd))
+    app.add_handler(CommandHandler("give", admin_give_cmd))
+
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
 
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
