@@ -3,7 +3,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY bot.py .
-COPY .env .env
+# .env не копируем - токен приходит через переменные окружения Render (BOT_TOKEN)
 ENV PYTHONUNBUFFERED=1
 EXPOSE 10000
 CMD ["python", "bot.py"]
