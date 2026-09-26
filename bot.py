@@ -528,6 +528,7 @@ def games_inline_kb():
          InlineKeyboardButton("🪙 Орёл и Решка", callback_data="game_coin")],
         [InlineKeyboardButton("🎰 Слоты", callback_data="game_slots"),
          InlineKeyboardButton("🎯 Дартс / Кубик", callback_data="game_dice")],
+        [InlineKeyboardButton("🎡 Рулетка (лудка)", callback_data="game_roulette")],
         [InlineKeyboardButton("🎁 Магазин", callback_data="shop"),
          InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
         [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
@@ -2000,6 +2001,43 @@ async def handle_dice_picker(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=dice_kb())
 
+# --- РУЛЕТКА С ЛУДКОЙ ---
+async def start_roulette(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "🎡 <b>Рулетка — поставь на красное/чёрное</b>\nВыбери ставку и цвет — удвоение или проигрыш!"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Красное 10", callback_data="roulette_red_10"), InlineKeyboardButton("⚫ Чёрное 10", callback_data="roulette_black_10")],
+        [InlineKeyboardButton("🔴 Красное 50", callback_data="roulette_red_50"), InlineKeyboardButton("⚫ Чёрное 50", callback_data="roulette_black_50")],
+        [InlineKeyboardButton("🔴 Красное 100", callback_data="roulette_red_100"), InlineKeyboardButton("⚫ Чёрное 100", callback_data="roulette_black_100")],
+        [InlineKeyboardButton("⬅️ Меню", callback_data="menu")]
+    ])
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def handle_roulette(update: Update, context: ContextTypes.DEFAULT_TYPE, color: str, bet: int):
+    user = update.effective_user
+    bal = db_get_points(user.id)
+    if bal < bet:
+        await update.callback_query.answer(f"Недостаточно поинтов: {bal} < {bet}", show_alert=True)
+        return
+    import random
+    win_color = random.choice(["red","black"])
+    win = (color == win_color)
+    delta = bet if win else -bet
+    db_add_points(user.id, delta, game_inc=1, win_inc=1 if win else 0)
+    new_bal = db_get_points(user.id)
+    res = f"🎡 Выпало <b>{'🔴 Красное' if win_color=='red' else '⚫ Чёрное'}</b>\n"
+    res += f"{'🎉 Победа! +'+str(bet) if win else '💸 Проигрыш -'+str(bet)} — баланс <b>{new_bal}</b>"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Ещё раз", callback_data=f"roulette_{color}_{bet}"), InlineKeyboardButton("🎮 Меню", callback_data="menu")],
+        [InlineKeyboardButton("📤 Поделиться", url=f"https://t.me/share/url?url=https://t.me/Gamusonbot?start=r{user.id}&text=Кручу+рулетку+в+GameFi+Hunters!")]
+    ])
+    await update.callback_query.edit_message_text(res, parse_mode=ParseMode.HTML, reply_markup=kb)
+    if win:
+        try: await send_win_share(update, context, bet)
+        except: pass
+
 async def handle_dice_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, emoji: str):
     chat_id = update.effective_chat.id
     try:
@@ -2102,6 +2140,14 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_slots(update, context)
     elif data == "game_dice":
         await handle_dice_picker(update, context)
+    elif data == "game_roulette":
+        await start_roulette(update, context)
+    elif data.startswith("roulette_"):
+        # roulette_red_10
+        parts = data.split("_")
+        color = parts[1]
+        bet = int(parts[2])
+        await handle_roulette(update, context, color, bet)
     elif data == "invite":
         await invite_cmd(update, context)
     elif data == "topref":
@@ -2193,9 +2239,17 @@ async def health_server():
                 body = await request.json()
             except: body = {}
             uid = body.get("user_id") or request.query.get("user_id")
+            bet = int(body.get("bet") or 0)
             try: uid = int(uid)
             except: return web.json_response({"error":"user_id required"}, status=400, headers={"Access-Control-Allow-Origin":"*"})
-            # антинакрутка: лимит 1 спин / 2 сек на юзера (простой in-memory)
+            # ставка 0 = без риска (как раньше +0/5/10/20), если bet>0 — лудка: можно проиграть
+            if bet < 0: bet = 0
+            if bet > 0:
+                # проверка баланса
+                bal = db_get_points(uid)
+                if bal < bet:
+                    return web.json_response({"error": f"Недостаточно поинтов: {bal} < {bet}"}, status=400, headers={"Access-Control-Allow-Origin":"*"})
+            # антинакрутка: лимит 1 спин / 2 сек
             now = __import__("time").time()
             if not hasattr(api_slots, "last"):
                 api_slots.last = {}
@@ -2203,33 +2257,55 @@ async def health_server():
             if now - last < 2:
                 return web.json_response({"error":"slow down"}, status=429, headers={"Access-Control-Allow-Origin":"*"})
             api_slots.last[uid] = now
-            # крутим как в bot.py
             import random
             val = random.randint(1,64)
-            if val == 64:
-                reward, res = 20, "💎 ДЖЕКПОТ 777! +20"
-            elif val in [1,22,43]:
-                reward, res = 10, "🎉 Выигрыш! +10"
-            elif val in [16,32,48]:
-                reward, res = 5, "🍀 +5"
+            # лудка: если ставка есть — выигрыш = множитель * ставка, проигрыш = -ставка
+            if bet > 0:
+                if val == 64:
+                    reward, res, mult = bet*5, f"💎 ДЖЕКПОТ 777! x5 → +{bet*5}", 5
+                elif val in [1,22,43]:
+                    reward, res, mult = bet*2, f"🎉 Выигрыш x2 → +{bet*2}", 2
+                elif val in [16,32,48]:
+                    reward, res, mult = bet, f"🍀 Возврат x1 → +{bet}", 1
+                else:
+                    reward, res = -bet, f"💸 Проигрыш —{bet} pts"
+                # начисляем reward (может быть отрицательным)
+                try:
+                    con = _db()
+                    cur = con.cursor()
+                    cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
+                    if not cur.fetchone():
+                        cur.execute("INSERT INTO users (user_id, username, first_name, created_at) VALUES (?,?,?,?)", (uid, "", "", __import__("datetime").datetime.now().isoformat()))
+                        con.commit()
+                    con.close()
+                except: pass
+                # reward уже с учётом ставки (отрицательный при проигрыше)
+                # но db_add_points ожидает delta, так что +reward (если -bet — снимет)
+                db_add_points(uid, reward, game_inc=1, win_inc=1 if reward>0 else 0)
+                pts = db_get_points(uid)
+                # для фронта: reward может быть отрицательным
+                return web.json_response({"value": val, "reward": reward, "text": res, "points": pts, "bet": bet}, headers={"Access-Control-Allow-Origin":"*"})
             else:
-                reward, res = 0, "😢 Мимо..."
-            # начисляем
-            # ensure user exists
-            try:
-                # upsert minimal
-                con = _db()
-                cur = con.cursor()
-                cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
-                if not cur.fetchone():
-                    cur.execute("INSERT INTO users (user_id, username, first_name, created_at) VALUES (?,?,?,?)", (uid, "", "", __import__("datetime").datetime.now().isoformat()))
-                    con.commit()
-                con.close()
-            except: pass
-            db_add_points(uid, reward, game_inc=1, win_inc=1 if reward>0 else 0)
-            # достаём новый баланс
-            pts = db_get_points(uid)
-            return web.json_response({"value": val, "reward": reward, "text": res, "points": pts}, headers={"Access-Control-Allow-Origin":"*"})
+                if val == 64:
+                    reward, res = 20, "💎 ДЖЕКПОТ 777! +20"
+                elif val in [1,22,43]:
+                    reward, res = 10, "🎉 Выигрыш! +10"
+                elif val in [16,32,48]:
+                    reward, res = 5, "🍀 +5"
+                else:
+                    reward, res = 0, "😢 Мимо..."
+                try:
+                    con = _db()
+                    cur = con.cursor()
+                    cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
+                    if not cur.fetchone():
+                        cur.execute("INSERT INTO users (user_id, username, first_name, created_at) VALUES (?,?,?,?)", (uid, "", "", __import__("datetime").datetime.now().isoformat()))
+                        con.commit()
+                    con.close()
+                except: pass
+                db_add_points(uid, reward, game_inc=1, win_inc=1 if reward>0 else 0)
+                pts = db_get_points(uid)
+                return web.json_response({"value": val, "reward": reward, "text": res, "points": pts, "bet": 0}, headers={"Access-Control-Allow-Origin":"*"})
         async def options_handler(request):
             return web.Response(headers={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, X-User-Id"})
         app = web.Application()
