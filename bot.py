@@ -814,10 +814,23 @@ async def fetch_any_rss(urls, limit=4):
     return [], None
 
 def ai_image_url(prompt, w=1024, h=1024):
-    # Pollinations - бесплатный генератор без ключа, бот сам генерит картинки по промпту
+    # Fallback Pollinations URL (если свой генератор не сработал)
     import urllib.parse
     p = urllib.parse.quote(prompt[:280])
     return f"https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&model=flux&nologo=true&seed={random.randint(1,999999)}"
+
+async def get_own_image(prompt: str):
+    # пробует свой HF генератор, возвращает путь к файлу или None
+    loop = __import__('asyncio').get_event_loop()
+    try:
+        out = f"/tmp/own_{__import__('random').randint(1000,999999)}.jpg"
+        # run in executor to not block
+        result = await loop.run_in_executor(None, lambda: generate_own_image(prompt, out))
+        if result and __import__('os').path.exists(result):
+            return result
+    except Exception as e:
+        log.warning(f"get_own_image async fail: {e}")
+    return None
 
 def sanitize_prompt(title: str) -> str:
     # Pollinations плохо ест кириллицу → делаем английский фолбэк
@@ -839,6 +852,27 @@ if not HUNTER_STICKER.exists():
     alt = Path("/home/user/hunter_sticker.png")
     if alt.exists():
         HUNTER_STICKER = alt
+
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+# свой генератор — Hugging Face Qwen/Qwen-Image (фотореализм, лучший для охотника)
+def generate_own_image(prompt: str, out_path: str = "/tmp/own_gen.jpg"):
+    try:
+        from huggingface_hub import InferenceClient
+        if not HF_TOKEN:
+            log.warning("HF_TOKEN not set, fallback to Pollinations")
+            return None
+        client = InferenceClient(token=HF_TOKEN)
+        # Qwen дает лучший охотник (проверено)
+        image = client.text_to_image(prompt, model="Qwen/Qwen-Image")
+        # Qwen returns 1024x768, save as JPEG
+        if image.mode == "RGBA":
+            image = image.convert("RGB")
+        image.save(out_path, "JPEG", quality=92)
+        log.info(f"Own generator success: {out_path}")
+        return out_path
+    except Exception as e:
+        log.warning(f"Own generator failed: {e}, fallback to Pollinations")
+        return None
 
 async def fetch_og_image(url: str):
     try:
@@ -995,8 +1029,16 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         prompt_title = "CONTROL Resonant Silent Hill Townfall Witcher 3 Remastered gaming"
         src_name = "календарь"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
-    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА (без стикера)
+    # СВОЙ ГЕНЕРАТОР: Qwen/Qwen-Image с охотником, fallback на фото из источника
     bg_url = None
+    # свой генератор — главный
+    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, jungle ruins, photorealistic, highly detailed, 8k, sharp focus"
+    own_prompt = f"{hunter_base}, video game news art about {prompt_title}, epic cinematic"
+    own_path = await get_own_image(own_prompt)
+    if own_path:
+        await post_photo_to_channel(context, own_path, caption, kb)
+        return
+    # fallback на фото из источника
     low_title = title.lower() if 'title' in locals() else ""
     if "ведьмак" in low_title or "witcher" in low_title:
         bg_url = "https://cdn.akamai.steamstatic.com/steam/apps/292030/header.jpg"
@@ -1004,9 +1046,7 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         try:
             bg_url = await fetch_og_image(link)
         except: pass
-    # если не нашли og:image — пробуем enclosure/media из RSS уже было, fallback на polling
     if not bg_url:
-        # fallback: если нет картинки — шлем без фото (текст) или polling
         hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
         prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
         bg_url = ai_image_url(prompt)
@@ -1056,7 +1096,13 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = sanitize_prompt("Bitcoin Ethereum crypto chart futuristic")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
-    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА
+    # СВОЙ ГЕНЕРАТОР для крипты
+    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, news studio, pointing at Bitcoin chart, photorealistic, highly detailed"
+    own_prompt = f"{hunter_base}, crypto news art about {prompt_title}, neon trading chart"
+    own_path = await get_own_image(own_prompt)
+    if own_path:
+        await post_photo_to_channel(context, own_path, caption, kb)
+        return
     bg_url = None
     try:
         if 'link' in locals() and link:
@@ -1095,7 +1141,13 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = "Hamster Kombat hamsters Bitcoin gamepad, tokenized deposits"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Играть и заработать", url="https://t.me/Gamusonbot?start=gamefi")]])
-    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА для GameFi
+    # СВОЙ ГЕНЕРАТОР для GameFi
+    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, photorealistic, highly detailed"
+    own_prompt = f"{hunter_base}, GameFi news about {prompt_title}, bright Telegram game"
+    own_path = await get_own_image(own_prompt)
+    if own_path:
+        await post_photo_to_channel(context, own_path, caption, kb)
+        return
     bg_url = None
     try:
         if 'link' in locals() and link:
@@ -1104,7 +1156,6 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     if bg_url:
         await post_photo_to_channel(context, bg_url, caption, kb)
     else:
-        # fallback polling if no image
         hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, cartoon"
         prompt = f"{hunter}, GameFi play to earn news about {prompt_title}, bright Telegram game, 4k"
         photo = ai_image_url(prompt)

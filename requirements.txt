@@ -1,5 +1,6 @@
 Pillow==10.4.0
 aiohttp==3.9.5
 aiosqlite==0.20.0
+huggingface_hub==0.34.0
 python-dotenv==1.0.1
 python-telegram-bot[all]==21.6
