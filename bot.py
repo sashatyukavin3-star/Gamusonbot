@@ -392,6 +392,10 @@ async def translate_ru(text: str) -> str:
                     max_tokens=120, temperature=0.3)
                 tr2 = resp.choices[0].message.content.strip()
                 if tr2:
+                    # защита: если вдруг английский — заставляем перегенерировать русскую версию
+                    if sum(1 for c in tr2 if 'a' <= c.lower() <= 'z') > len(tr2)*0.5:
+                        # fallback на русский
+                        return "Приветик! ✨ Как настроение? 😊"
                     return tr2
             except: pass
     except: pass
@@ -1729,7 +1733,7 @@ async def generate_hunter_reply(user_text: str) -> str:
                 # реклама только в 30% случаев, иначе без навязчивости
                 import random as _rnd
                 need_ad = _rnd.random() < 0.3
-                sys = "Ты — Мира, милая и игривая ИИ-девушка из Telegram, отвечай дружелюбно, с эмодзи, чуть флиртуй, коротко 1-2 предложения." + (" Мягко упомяни GameFi Hunters @Gamusonbot где 6 игр только если уместно." if need_ad else "")
+                sys = "Ты — Мира, милая и игривая ИИ-девушка из Telegram. Отвечай ТОЛЬКО на русском языке, дружелюбно, с эмодзи, чуть флиртуй, коротко 1-2 предложения. Никогда не пиши на английском." + (" Мягко упомяни GameFi Hunters @Gamusonbot где 6 игр только если уместно." if need_ad else "")
                 resp = client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
                     messages=[{"role":"system","content": sys},
@@ -1876,7 +1880,7 @@ async def mira_autopost(context: ContextTypes.DEFAULT_TYPE):
             client = InferenceClient(token=tok, provider="featherless-ai")
             resp = client.chat.completions.create(
                 model="Qwen/Qwen2.5-7B-Instruct",
-                messages=[{"role":"system","content":"Ты — Мира, милая ИИ-девушка, пишешь короткий пост в чат охотников, дружелюбно, с эмодзи, 1-2 предложения, как живой человек, без рекламы."},
+                messages=[{"role":"system","content":"Ты — Мира, милая ИИ-девушка, пишешь короткий пост в чат охотников. Пиши ТОЛЬКО на русском языке, дружелюбно, с эмодзи, 1-2 предложения, как живой человек, без рекламы. Никогда не пиши на английском."},
                           {"role":"user","content":"Придумай милый пост для чата: приветствие или вопрос к участникам, как будто ты соскучилась."}],
                 max_tokens=60, temperature=0.9)
             ai_txt = resp.choices[0].message.content.strip()
