@@ -1661,8 +1661,10 @@ async def discussion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # только в группах/супергруппах (чат обсуждений)
     if chat.type not in ("group","supergroup"):
         return
-    # если DISCUSSION_CHAT_ID задан — только там
-    if DISCUSSION_CHAT_ID_RUNTIME and chat.id != DISCUSSION_CHAT_ID_RUNTIME:
+    # если чат обсуждений не привязан — не спамим нигде (фикс левого канала)
+    if not DISCUSSION_CHAT_ID_RUNTIME:
+        return
+    if chat.id != DISCUSSION_CHAT_ID_RUNTIME:
         return
     text = msg.text or msg.caption or ""
     text_low = text.lower()
