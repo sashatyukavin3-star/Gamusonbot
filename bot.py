@@ -137,7 +137,7 @@ def db_init():
         rewarded_at TEXT
     )""")
     # миграция users: добавляем колонки если нет
-    for col, typ in [("referrer_id","INTEGER"),("referral_count","INTEGER DEFAULT 0"),("referral_points","INTEGER DEFAULT 0")]:
+    for col, typ in [("referrer_id","INTEGER"),("referral_count","INTEGER DEFAULT 0"),("referral_points","INTEGER DEFAULT 0"),("last_channel_bonus","TEXT"),("streak","INTEGER DEFAULT 0")]:
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
         except: pass
@@ -211,7 +211,8 @@ def db_add_points(user_id, delta, game_inc=1, win_inc=0):
 def db_get_user(user_id):
     con = _db()
     cur = con.cursor()
-    cur.execute("SELECT user_id, username, first_name, points, games_played, wins, last_daily FROM users WHERE user_id=?", (user_id,))
+    # выбираем все колонки для бонусов/рефки (совместимо со старыми вызовами row[0..6])
+    cur.execute("SELECT user_id, username, first_name, points, games_played, wins, last_daily, created_at, referrer_id, referral_count, referral_points, last_channel_bonus, streak FROM users WHERE user_id=?", (user_id,))
     row = cur.fetchone()
     con.close()
     return row
@@ -499,17 +500,7 @@ def referral_share_kb(user_id: int):
     ])
 
 async def send_win_share(update, context, reward: int):
-    try:
-        user_id = update.effective_user.id
-        link = f"https://t.me/Gamusonbot?start=r{user_id}"
-        share = f"https://t.me/share/url?url={link}&text=Я+выиграл+{reward}+pts+в+GameFi+Hunters!+6+игр+и+подарки+—+залетай!"
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"👥 <b>Хочешь ещё +200?</b> Поделись победой — друг перейдёт по твоей ссылке и сыграет 1 игру, ты получишь <b>+200 pts</b>!\n<code>{link}</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Поделиться", url=share)], [InlineKeyboardButton("👥 /invite", callback_data="invite")]])
-        )
-    except: pass
+    return
 
 # --- КЛАВИАТУРЫ ---
 def main_menu_kb():
@@ -529,6 +520,7 @@ def games_inline_kb():
         [InlineKeyboardButton("🎰 Слоты", callback_data="game_slots"),
          InlineKeyboardButton("🎯 Дартс / Кубик", callback_data="game_dice")],
         [InlineKeyboardButton("🎡 Рулетка (лудка)", callback_data="game_roulette")],
+        [InlineKeyboardButton("👥 Пригласи друга +200", callback_data="invite")],
         [InlineKeyboardButton("🎁 Магазин", callback_data="shop"),
          InlineKeyboardButton("🏆 Рейтинг", callback_data="top")],
         [InlineKeyboardButton("👤 Профиль", callback_data="profile"),
@@ -636,16 +628,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML,
                                     reply_markup=main_menu_kb())
     await update.message.reply_text("🎮 Выбери игру или загляни в магазин:", reply_markup=games_inline_kb())
-    # быстрый доступ к рефке
-    try:
-        await update.message.reply_text(
-            "👥 <b>Хочешь халявные поинты?</b> Пригласи друга — +200 за каждого (акция)!\n"
-            f"Твоя ссылка: <code>https://t.me/Gamusonbot?start=r{user.id}</code>\n"
-            "Жми /invite чтобы видеть прогресс",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Поделиться", url=f"https://t.me/share/url?url=https://t.me/Gamusonbot?start=r{user.id}&text=Зарубись+со+мной+в+GameFi+Hunters+—+6+игр+и+подарки+Telegram!")]])
-        )
-    except: pass
+    # инвайт теперь только как инлайн-кнопка в меню, без спама
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -842,23 +825,57 @@ async def bonus_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db_upsert_user(user)
     row = db_get_user(user.id)
-    last_daily = row[6] if row else None
-    if not can_claim_bonus(last_daily):
-        text = "🎁 Ты уже забирал бонус сегодня! Возвращайся завтра — +50 поинтов ждут."
-        if update.callback_query:
-            await update.callback_query.answer("Уже получено сегодня 😉", show_alert=False)
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть", callback_data="menu")]]))
+    # row: user_id, username, first_name, points, games_played, wins, last_daily, created_at, referrer_id, referral_count, referral_points, last_channel_bonus, streak
+    last_daily = row[6] if row and len(row)>6 else None
+    last_channel = row[11] if row and len(row)>11 else None
+    # проверяем подписку на канал
+    is_sub = await is_user_subscribed(context.bot, user.id)
+    can_daily = can_claim_bonus(last_daily)
+    can_channel = can_claim_bonus(last_channel) and is_sub
+    if not can_daily and not can_channel:
+        if not is_sub:
+            text = "🎁 Бонусы: ежедневный уже взят. А ещё <b>+50 за подписку</b> на @gamefi_hunters — подпишись и жми ниже!"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📢 Подписаться", url=FORCE_CHANNEL_URL)], [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]])
         else:
-            await update.message.reply_text(text)
+            text = "🎁 Ты уже забирал все бонусы сегодня! Завтра — снова +50 ежедневный. А пока играй — получай поинты в играх!"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть", callback_data="menu")]])
+        if update.callback_query:
+            await update.callback_query.answer("Уже получено 😉", show_alert=False)
+            await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        else:
+            await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
         return
+    total = 0
+    msgs = []
     con = _db()
     cur = con.cursor()
-    cur.execute("UPDATE users SET points=points+50, last_daily=? WHERE user_id=?", (datetime.now().isoformat(), user.id))
+    if can_daily:
+        cur.execute("UPDATE users SET points=points+50, last_daily=? WHERE user_id=?", (datetime.now().isoformat(), user.id))
+        total += 50
+        msgs.append("📅 Ежедневный +50")
+    if can_channel:
+        cur.execute("UPDATE users SET points=points+50, last_channel_bonus=? WHERE user_id=?", (datetime.now().isoformat(), user.id))
+        total += 50
+        msgs.append("📢 За подписку +50")
+    # стрик: если 3 дня подряд забирает — +20 доп
+    # упростим: если can_daily — увеличим стрик
+    if can_daily:
+        try:
+            cur.execute("SELECT streak FROM users WHERE user_id=?", (user.id,))
+            st = (cur.fetchone() or [0])[0] or 0
+            # если вчера был бонус — +1, иначе 1
+            # проверим last_daily до обновления (старый)
+            st = st + 1 if can_daily else 1
+            if st % 3 == 0:
+                cur.execute("UPDATE users SET points=points+30 WHERE user_id=?", (user.id,))
+                total += 30
+                msgs.append("🔥 Стрик 3 дня +30")
+            cur.execute("UPDATE users SET streak=? WHERE user_id=?", (st, user.id))
+        except: pass
     con.commit()
     con.close()
-    text = "🎁 <b>Бонус получен! +50 поинтов</b> 💰\nПриходи завтра за новым бонусом!"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-                                InlineKeyboardButton("🎮 Игры", callback_data="menu")]])
+    text = f"🎁 <b>Бонусы получены! +{total} поинтов</b> 💰\n" + "\n".join(msgs) + "\nПриходи завтра за новыми!"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("👤 Профиль", callback_data="profile"), InlineKeyboardButton("🎮 Игры", callback_data="menu")]])
     if update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
@@ -1821,7 +1838,7 @@ async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Ещё раз", callback_data="game_guess"),
                  InlineKeyboardButton("🎮 Меню", callback_data="menu")],
-                [InlineKeyboardButton("📤 Поделиться победой", url=f"https://t.me/share/url?url=https://t.me/Gamusonbot?start=r{update.effective_user.id}&text=Я+выиграл+в+GameFi+Hunters!+Присоединяйся+—+6+игр+и+подарки!")]
+                [InlineKeyboardButton("👥 Пригласи +200", callback_data="invite")]
             ])
         )
         try: await send_win_share(update, context, reward)
@@ -2146,23 +2163,25 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "check_sub":
         uid = update.effective_user.id
         if await is_user_subscribed(context.bot, uid):
-            # даём бонус 50 если первый раз
+            # выдаём через бонус-логику (проверит last_channel_bonus)
             try:
-                con = _db()
-                cur = con.cursor()
-                cur.execute("SELECT points FROM users WHERE user_id=?", (uid,))
-                row = cur.fetchone()
-                if row:
-                    # проверим не давали ли уже бонус за подписку (по referral_points отдельной логике — просто даём разово если < 50 и не было)
-                    # проще: даём +50 и помечаем
-                    pass
-                con.close()
-            except: pass
-            try:
-                db_add_points(uid, 50, game_inc=0, win_inc=0)
-                await q.answer("✅ Подписка подтверждена! +50 pts", show_alert=True)
-            except: await q.answer("✅ Подписка подтверждена!", show_alert=True)
-            await q.edit_message_text("🎉 Спасибо за подписку! Теперь жми /menu чтобы играть", reply_markup=games_inline_kb())
+                # вызовем bonus_cmd логику напрямую: проверим can_channel
+                row = db_get_user(uid)
+                last_channel = row[11] if row and len(row)>11 else None
+                if can_claim_bonus(last_channel):
+                    con = _db()
+                    cur = con.cursor()
+                    cur.execute("UPDATE users SET points=points+50, last_channel_bonus=? WHERE user_id=?", (datetime.now().isoformat(), uid))
+                    con.commit()
+                    con.close()
+                    await q.answer("✅ Подписка подтверждена! +50 pts за подписку", show_alert=True)
+                    await q.edit_message_text("🎉 Спасибо за подписку! +50 pts начислено. Жми /bonus за ещё бонусами!", reply_markup=games_inline_kb())
+                else:
+                    await q.answer("✅ Подписка уже подтверждена ранее", show_alert=True)
+                    await q.edit_message_text("🎉 Ты уже получал бонус за подписку. Жди завтра /bonus!", reply_markup=games_inline_kb())
+            except Exception as e:
+                await q.answer("✅ Подписка подтверждена!", show_alert=True)
+                await q.edit_message_text("🎉 Спасибо за подписку! Теперь жми /menu чтобы играть", reply_markup=games_inline_kb())
         else:
             await q.answer("❌ Ты ещё не подписан на канал!", show_alert=True)
     elif data.startswith("dice_"):
