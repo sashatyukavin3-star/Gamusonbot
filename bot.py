@@ -13,6 +13,7 @@ import random
 import sqlite3
 import os
 import re
+import html
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -761,11 +762,12 @@ async def fetch_rss_titles(url, limit=4):
                 if le is not None:
                     link = le.get("href","")
             desc = (item.findtext("description", "") or item.findtext("summary","") or "").strip()
-            if len(desc) > 200:
-                desc = desc[:197]+"..."
-            if title:
-                # чистим HTML из desc
-                desc = re.sub(r"<[^>]+>", "", desc)
+            # чистим HTML и сущности ДО обрезки
+            desc = html.unescape(desc)
+            desc = re.sub(r"<[^>]+>", "", desc)
+            desc = desc.replace("\n"," ").strip()
+            if len(desc) > 180:
+                desc = desc[:177]+"..."
                 items.append((title, link, desc))
         # Atom entries
         if not items:
@@ -775,6 +777,11 @@ async def fetch_rss_titles(url, limit=4):
                 le = entry.find("atom:link", ns)
                 link = le.get("href","") if le is not None else ""
                 desc = (entry.findtext("atom:summary","", namespaces=ns) or "").strip()
+                desc = html.unescape(desc)
+                desc = re.sub(r"<[^>]+>", "", desc)
+                desc = desc.replace("\n"," ").strip()
+                if len(desc) > 180:
+                    desc = desc[:177]+"..."
                 if title:
                     items.append((title, link, desc))
         return items
@@ -808,8 +815,22 @@ async def fetch_any_rss(urls, limit=4):
 def ai_image_url(prompt, w=1024, h=1024):
     # Pollinations - бесплатный генератор без ключа, бот сам генерит картинки по промпту
     import urllib.parse
-    p = urllib.parse.quote(prompt[:300])
+    p = urllib.parse.quote(prompt[:280])
     return f"https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&model=flux&nologo=true&seed={random.randint(1,999999)}"
+
+def sanitize_prompt(title: str) -> str:
+    # Pollinations плохо ест кириллицу → делаем английский фолбэк
+    if re.search(r"[а-яА-Я]", title):
+        low = title.lower()
+        if "ведьмак" in low or "witcher" in low:
+            return "Witcher 3 remaster patch CDPR fantasy RPG"
+        if "007" in title or "first light" in low:
+            return "James Bond 007 First Light Golden Joystick Awards game"
+        if "ace combat" in low:
+            return "Ace Combat 8 fighter jets clouds cinematic"
+        return "epic video game news fantasy RPG cinematic"
+    # режем длинные заголовки для промпта
+    return title[:80]
 
 async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup=None):
     try:
@@ -832,23 +853,36 @@ async def post_photo_to_channel(context, photo_url, caption, reply_markup=None):
         await post_to_channel(context, caption, reply_markup)
 
 async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
-    # 07:00 UTC — реальные гейминг-новости из RSS (DTF/SimulationDaily), коротко и без воды
-    items, src = await fetch_any_rss(RSS_GAMING, limit=4)
+    # 07:00 UTC — реальные гейминг-новости, коротко, понятно и с хуком
+    items, src = await fetch_any_rss(RSS_GAMING, limit=6)
     if items:
-        title, link, desc = random.choice(items)
-        # обрезаем заголовок до 90 символов
+        # приоритет — понятные новости (Ведьмак)
+        chosen = None
+        for t,l,d in items:
+            if "ведьмак" in t.lower() or "witcher" in t.lower():
+                chosen = (t,l,d); break
+        title, link, desc = chosen if chosen else random.choice(items)
         short_title = title if len(title) < 90 else title[:87]+"..."
-        # источник домен
         src_name = src.split("/")[2] if src else "RSS"
-        caption = (
-            f"🎮 <b>Гейминг сегодня</b>\n\n"
-            f"🔥 <b>{short_title}</b>\n"
-            f"{desc}\n"
-            f"🔗 {link}\n\n"
-            f"<i>Источник: {src_name}</i> | Как тебе? 👇\n"
-            f"🎯 Поинты → @Gamusonbot /start"
-        )
-        prompt_title = title
+        if "ведьмак" in title.lower() or "witcher" in title.lower():
+            caption = (
+                f"🎮 <b>Ведьмак 3 — ремастер будет бесплатным патчем!</b>\n\n"
+                f"🔥 CDPR подтвердили: {short_title}\n"
+                f"Обзоры — за сутки до релиза 29.09. Покупать заново не нужно, обновится текущая игра. Что внутри патча — пока секрет.\n"
+                f"🔗 <a href=\"{link}\">Читать на {src_name}</a>\n\n"
+                f"Ждёшь ремастер или уже закрыл 100%? 👇\n"
+                f"🎯 Фарми поинты → @Gamusonbot /start"
+            )
+        else:
+            caption = (
+                f"🎮 <b>Гейминг — коротко и по делу</b>\n\n"
+                f"🔥 <b>{short_title}</b>\n"
+                f"{desc}\n"
+                f"🔗 <a href=\"{link}\">Читать полностью на {src_name}</a>\n\n"
+                f"Что думаешь? 👇\n"
+                f"🎯 Фарми поинты → @Gamusonbot /start"
+            )
+        prompt_title = sanitize_prompt(title)
     else:
         # фолбэк — календарь сентября (реальные даты, не фейк)
         caption = (
@@ -889,17 +923,18 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         title, link, desc = random.choice(items)
         short_title = title if len(title) < 85 else title[:82]+"..."
         src_name = src.split("/")[2] if src else "Cointelegraph"
+        # делаем понятнее: заголовок + суть + ссылка + цены
         caption = (
-            f"💰 <b>Крипта сегодня</b>\n\n"
+            f"💰 <b>Крипта — главное за минуту</b>\n\n"
             f"📈 <b>{short_title}</b>\n"
             f"{desc}\n"
-            f"🔗 {link}\n\n"
+            f"🔗 <a href=\"{link}\">Читать полностью</a>\n\n"
             f"{price_line}"
             f"<i>Источник: {src_name} + CoinGecko</i>\n"
-            f"Лонг или шорт? 👇\n"
-            f"💎 Stars → @Gamusonbot /shop"
+            f"Твой прогноз — рост или падение? 👇\n"
+            f"💎 Меняй поинты на Stars → @Gamusonbot /shop"
         )
-        prompt_title = title
+        prompt_title = sanitize_prompt(title)
     else:
         caption = (
             f"💰 <b>Крипта сегодня</b>\n\n"
@@ -909,7 +944,7 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
             f"<i>CoinGecko + BTCPressWire 25-26.09</i>\n"
             f"💎 Зарабатывай → @Gamusonbot /shop"
         )
-        prompt_title = "Bitcoin Ethereum crypto chart futuristic"
+        prompt_title = sanitize_prompt("Bitcoin Ethereum crypto chart futuristic")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
     hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on shoulder, holding microphone GAMEFI HUNTERS, pointing at Bitcoin chart, BTC coins floating, news studio"
     prompt = f"{hunter}, crypto news about {prompt_title}, neon trading chart, 4k, cartoon"
