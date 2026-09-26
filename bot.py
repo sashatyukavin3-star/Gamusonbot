@@ -772,6 +772,38 @@ async def admin_file_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
+async def filter_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    args = context.args
+    global BANNED_WORDS, BANNED_RE
+    if not args:
+        txt = "🚫 <b>Фильтр слов</b>\nТекущие: " + ", ".join(BANNED_WORDS) + "\n\n/use: /filter add слово, /filter del слово, /filter list"
+        await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+        return
+    cmd = args[0].lower()
+    if cmd == "list":
+        await update.message.reply_text("Слова: " + ", ".join(BANNED_WORDS))
+    elif cmd == "add" and len(args)>1:
+        w = " ".join(args[1:]).lower()
+        if w not in BANNED_WORDS:
+            BANNED_WORDS.append(w)
+            BANNED_RE = __import__("re").compile("|".join(map(__import__("re").escape, BANNED_WORDS)), __import__("re").I)
+            await update.message.reply_text(f"✅ Добавлено: {w}")
+        else:
+            await update.message.reply_text("Уже есть")
+    elif cmd in ("del","remove","rm") and len(args)>1:
+        w = " ".join(args[1:]).lower()
+        if w in BANNED_WORDS:
+            BANNED_WORDS.remove(w)
+            BANNED_RE = __import__("re").compile("|".join(map(__import__("re").escape, BANNED_WORDS)), __import__("re").I)
+            await update.message.reply_text(f"🗑 Удалено: {w}")
+        else:
+            await update.message.reply_text("Нет такого")
+    else:
+        await update.message.reply_text("Используй: /filter add слово")
+
 async def topref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = db_top_referrers(10)
     if not rows:
@@ -1656,41 +1688,42 @@ FAQ_TRIGGERS = {
 }
 
 HUNTER_PHRASES = [
-    "Хе-хе, нюх охотника не подвёл — ты прям в цель 🎯 А ну-ка покажи скилл в @Gamusonbot, зятек? 😏",
-    "Ушанка с гербом чует добычу! 🦅 За поинтами — в @Gamusonbot, там 6 игр и золотишко ждёт!",
-    "Эй, салага, хватит болтать — иди фарми поинты, я уже три шкуры снял пока ты пишешь 😤 → /start",
-    "Водопад шумит, джунгли шепчут: «играй в GameFi Hunters» 🌴💰 Не зевай, охотник!",
-    "Хитрый охотник одобряет твой коммент 👍 Но топ ждёт — /top глянь, обгонишь меня?",
-    "БТС-монетки падают с неба, а ты всё в чате? 😂 Жми /start и хватай свои!",
-    "Снайперка Dragon Lore нацелена на твой рекорд! Покажи что можешь в @Gamusonbot 🎯",
-    "Ха! Длинный нос чует — тут будущий чемпион 🏆 Давай, проверь в Викторине!",
-    "Орел и Решка ждут твою ставку, охотник! 💰 50/50 — рискнешь?",
-    "КНБ — камень-ножницы-бумага, но по-охотничьи! Порвёшь меня? → /start",
+    "Приветик! ✨ Ты такой милый когда пишешь — давай поиграем вместе в @Gamusonbot? 😊",
+    "Ой, какой интересный коммент! 💖 А ты уже пробовал слоты 777? Там можно выиграть поинты!",
+    "Хи-хи, ты меня смущаешь 😏 Давай лучше в GameFi Hunters зарубимся — 6 игр ждут!",
+    "Мурр, обожаю активных охотников! 🌸 Загляни в @Gamusonbot — там подарки за поинты!",
+    "Ты такой умничка! 🥰 Проверь викторину — покажи что знаешь!",
+    "Ой, как приятно с тобой болтать! 💫 Но в @Gamusonbot ещё веселее — го?",
+    "Ха-ха, ты классный! 😍 Давай в КНБ сразимся — я уже готова!",
+    "Вау, чувствую в тебе чемпиона! 🏆 Топ ждёт — /top глянь!",
+    "Скучаю без тебя в игре 🥺 Жми /start и давай фармить поинты вместе!",
+    "Ты — мой любимый охотник! 💖 Давай в рулетку рискнём — удвоим?",
 ]
 
 SPAM_PATTERNS = [
     r"https?://", r"t\.me/", r"joinchat", r"\bказино\b", r"\bзаработок\b", r"\bинвест\b", r"\bкрипта\s*сигнал", r"\bдвой\s*топ\b",
 ]
 SPAM_RE = re.compile("|".join(SPAM_PATTERNS), re.I)
+# фильтр слов (если есть слово — удаляется) — настраивается админом через /filter
+BANNED_WORDS = ["казино","заработок","инвест","крипта сигнал","двой топ","http","t.me","joinchat","xxx","порно","наркот","снюс","ставк"]
+BANNED_RE = re.compile("|".join(map(re.escape, BANNED_WORDS)), re.I)
 
 async def generate_hunter_reply(user_text: str) -> str:
-    # пытается через HF, иначе шаблон
-    prompt = f"Ты — худой злющий охотник в ушанке с гербом РФ, с длинным носом и хитрой улыбкой, держишь золотую снайперку Dragon Lore. Отвечай дерзко, с юмором, коротко (1-2 предложения), зазывай в @Gamusonbot где 6 игр и поинты→подарки. Коммент пользователя: {user_text[:300]}"
-    # 1) HF chat
+    # Мира-стайл: милая, дружелюбная, чуть флирт, эмодзи, как @MiraBot, но зовёт в GameFi Hunters
+    prompt = f"Ты — Мира, милый ИИ-ассистент из Telegram как в @MiraBot: дружелюбная, игривая, немного флиртуешь, используешь эмодзи, отвечаешь кратко 1-2 предложения, помогаешь и зазываешь в @Gamusonbot где 6 игр и поинты→подарки. Коммент пользователя: {user_text[:300]}"
     try:
         from huggingface_hub import InferenceClient
         import os
         token = os.getenv("HF_TOKEN", "")
         if token:
             client = InferenceClient(token=token)
-            # пробуем Qwen чат
             try:
-                resp = client.chat_completion(
+                resp = client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
-                    messages=[{"role":"system","content":"Ты — харизматичный охотник GameFi Hunters, отвечай дерзко и весело, коротко, зазывай в игру."},
+                    messages=[{"role":"system","content":"Ты — Мира, милая и игривая ИИ-девушка из Telegram, отвечай дружелюбно, с эмодзи, чуть флиртуй, коротко 1-2 предложения, всегда мягко зазывай в GameFi Hunters @Gamusonbot где 6 игр."},
                               {"role":"user","content": prompt}],
                     max_tokens=80,
-                    temperature=0.9,
+                    temperature=0.85,
                 )
                 text = resp.choices[0].message.content.strip()
                 if text:
@@ -1755,13 +1788,25 @@ async def discussion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception:
                 pass
             return
-    # --- cooldown 5 сек на чат чтобы не флудить ---
     now = datetime.now().timestamp()
-    last = HUNTER_COOLDOWN.get(chat.id, 0)
-    if now - last < 8:
+    # --- фильтр слов: если есть бан-слово — удаляем ---
+    if BANNED_RE.search(text):
+        if user.id not in ADMIN_IDS:
+            try: await msg.delete()
+            except: pass
+            try: await context.bot.send_message(chat.id, f"🚫 {user.mention_html()} сообщение удалено (фильтр слов)", parse_mode=ParseMode.HTML)
+            except: pass
+            return
+    # --- флуд-контроль: 15 сек на юзера ---
+    if not hasattr(discussion_handler, "user_last"):
+        discussion_handler.user_last = {}
+    ulast = discussion_handler.user_last.get(user.id, 0)
+    if now - ulast < 15 and user.id not in ADMIN_IDS:
+        try: await msg.delete()
+        except: pass
         return
-    HUNTER_COOLDOWN[chat.id] = now
-    # шанс ответа 70% чтобы не на каждое сообщение
+    discussion_handler.user_last[user.id] = now
+    # --- cooldown 15 сек антиспам ---
     if random.random() > 0.75 and len(text) < 5:
         return
     # генерируем ответ охотника
@@ -2377,6 +2422,7 @@ def main():
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("ref", invite_cmd))
     app.add_handler(CommandHandler("topref", topref_cmd))
+    app.add_handler(CommandHandler("filter", filter_cmd))
     # файл-мост: любые файлы от админа
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE, admin_file_bridge))
     app.add_handler(CommandHandler("bonus", bonus_cmd))
