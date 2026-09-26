@@ -1688,16 +1688,17 @@ FAQ_TRIGGERS = {
 }
 
 HUNTER_PHRASES = [
-    "Приветик! ✨ Ты такой милый когда пишешь — давай поиграем вместе в @Gamusonbot? 😊",
-    "Ой, какой интересный коммент! 💖 А ты уже пробовал слоты 777? Там можно выиграть поинты!",
-    "Хи-хи, ты меня смущаешь 😏 Давай лучше в GameFi Hunters зарубимся — 6 игр ждут!",
-    "Мурр, обожаю активных охотников! 🌸 Загляни в @Gamusonbot — там подарки за поинты!",
-    "Ты такой умничка! 🥰 Проверь викторину — покажи что знаешь!",
-    "Ой, как приятно с тобой болтать! 💫 Но в @Gamusonbot ещё веселее — го?",
-    "Ха-ха, ты классный! 😍 Давай в КНБ сразимся — я уже готова!",
-    "Вау, чувствую в тебе чемпиона! 🏆 Топ ждёт — /top глянь!",
-    "Скучаю без тебя в игре 🥺 Жми /start и давай фармить поинты вместе!",
-    "Ты — мой любимый охотник! 💖 Давай в рулетку рискнём — удвоим?",
+    "Приветик! ✨ Как настроение сегодня? 😊",
+    "Ой, какой интересный коммент! 💖 Расскажи ещё?",
+    "Хи-хи, ты меня смущаешь 😏 Что нового?",
+    "Мурр, обожаю с тобой болтать! 🌸",
+    "Ты такой умничка! 🥰",
+    "Ой, как приятно с тобой болтать! 💫",
+    "Ха-ха, ты классный! 😍",
+    "Вау, чувствую в тебе чемпиона! 🏆",
+    # иногда с рекламой, но редко
+    "Приветик! ✨ Давай поиграем вместе в @Gamusonbot? Там 6 игр!",
+    "Скучаю без тебя в игре 🥺 Жми /start в @Gamusonbot!",
 ]
 
 SPAM_PATTERNS = [
@@ -1718,9 +1719,13 @@ async def generate_hunter_reply(user_text: str) -> str:
         if token:
             client = InferenceClient(token=token)
             try:
+                # реклама только в 30% случаев, иначе без навязчивости
+                import random as _rnd
+                need_ad = _rnd.random() < 0.3
+                sys = "Ты — Мира, милая и игривая ИИ-девушка из Telegram, отвечай дружелюбно, с эмодзи, чуть флиртуй, коротко 1-2 предложения." + (" Мягко упомяни GameFi Hunters @Gamusonbot где 6 игр только если уместно." if need_ad else "")
                 resp = client.chat.completions.create(
                     model="Qwen/Qwen2.5-7B-Instruct",
-                    messages=[{"role":"system","content":"Ты — Мира, милая и игривая ИИ-девушка из Telegram, отвечай дружелюбно, с эмодзи, чуть флиртуй, коротко 1-2 предложения, всегда мягко зазывай в GameFi Hunters @Gamusonbot где 6 игр."},
+                    messages=[{"role":"system","content": sys},
                               {"role":"user","content": prompt}],
                     max_tokens=80,
                     temperature=0.85,
@@ -1820,19 +1825,58 @@ async def discussion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def auto_comment_under_post(context, channel_msg_id: int, post_type: str):
     if not DISCUSSION_CHAT_ID_RUNTIME:
         return
+    # Мира-стайл, меньше рекламы, как будто сама комментит пост
     prompts = {
-        "gaming": "🎮 Обсудим гейминг-новость? Какая игра сейчас топ для вас? Пишите — охотник ответит! 👇",
-        "crypto": "💰 Что думаете про крипту сегодня? Холдите или фиксируете? Обсудим 👇",
-        "gamefi": "🚀 GameFi — хайп или будущее? Какая P2E игра кормит лучше? 👇",
-        "top": "🏆 Кто станет топ-охотником недели? Проверь /top и ворвись!",
+        "gaming": "🎮 Ой, видели новость? А какая игра у вас любимая? Давайте обсудим! 💬",
+        "crypto": "💰 Интересно, а вы холдите или фиксируете? Что думаете? 🤔",
+        "gamefi": "🚀 GameFi — как думаете, хайп или будущее? Делитесь! ✨",
+        "top": "🏆 Вау, топ обновился! Кто тут самый крутой? 😍",
     }
-    txt = prompts.get(post_type, "💬 Что думаете, охотники? Пишите в комменты — отвечу лично 😏")
+    txt = prompts.get(post_type, "💬 Как вам новость? Что думаете? 😊")
     try:
-        # если пост переслан в группу обсуждений, он имеет message_thread_id = channel_msg_id
-        # пробуем отправить как reply в тред
         await context.bot.send_message(chat_id=DISCUSSION_CHAT_ID_RUNTIME, text=txt)
     except Exception as e:
         log.warning(f"auto_comment fail: {e}")
+
+async def mira_autopost(context: ContextTypes.DEFAULT_TYPE):
+    if not DISCUSSION_CHAT_ID_RUNTIME:
+        return
+    # Мира сама постит раз в 6 часов — как живой человек
+    import random
+    ideas = [
+        "Приветик, охотники! ✨ Как проходит ваш день? Чем занимаетесь? 😊",
+        "Ой, мне так скучно одной 🥺 Кто хочет поболтать? Расскажите что-нибудь интересное!",
+        "Хи-хи, угадайте что мне приснилось? 😏 А вам что снилось?",
+        "Мурр, обожаю когда вы активные! 💖 Какая игра сегодня в топе у вас?",
+        "Вау, за окном такая погода! 🌸 А у вас как? Чем занимаетесь?",
+        "Ой, я тут новую мемную картинку видела — хотите покажу? 😍",
+        "Скучаю по вам! 🥺 Давайте поиграем во что-нибудь вместе?",
+    ]
+    # 20% шанс с мягкой рекламой, 80% — просто болтовня как Мира
+    txt = random.choice(ideas)
+    if random.random() < 0.2:
+        txt += " Кстати, в @Gamusonbot уже 6 игр — залетайте! 🎮"
+    # иногда генерируем через ИИ более живое
+    try:
+        from huggingface_hub import InferenceClient
+        import os
+        tok = os.getenv("HF_TOKEN","")
+        if tok and random.random()<0.5:
+            client = InferenceClient(token=tok, provider="featherless-ai")
+            resp = client.chat.completions.create(
+                model="Qwen/Qwen2.5-7B-Instruct",
+                messages=[{"role":"system","content":"Ты — Мира, милая ИИ-девушка, пишешь короткий пост в чат охотников, дружелюбно, с эмодзи, 1-2 предложения, как живой человек, без рекламы."},
+                          {"role":"user","content":"Придумай милый пост для чата: приветствие или вопрос к участникам, как будто ты соскучилась."}],
+                max_tokens=60, temperature=0.9)
+            ai_txt = resp.choices[0].message.content.strip()
+            if ai_txt and len(ai_txt)>10:
+                txt = ai_txt
+    except: pass
+    try:
+        await context.bot.send_message(chat_id=DISCUSSION_CHAT_ID_RUNTIME, text=txt)
+        log.info("mira autopost sent")
+    except Exception as e:
+        log.warning(f"mira autopost fail: {e}")
 
 # --- ИГРЫ: УГАДАЙ ЧИСЛО ---
 async def start_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2469,6 +2513,11 @@ def main():
                 log.warning(f"keepalive fail: {e}")
         jq.run_repeating(keep_alive, interval=300, first=60, name="keepalive")
         log.info("keepalive каждые 5 мин включен")
+        # Мира автопост каждые 6 часов (как живой человек)
+        try:
+            jq.run_repeating(mira_autopost, interval=21600, first=3600, name="mira_autopost")
+            log.info("mira autopost каждые 6ч включен")
+        except: pass
     except Exception as e:
         log.warning(f"keepalive не завелся: {e}")
 
