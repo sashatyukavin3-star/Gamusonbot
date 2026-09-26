@@ -2000,9 +2000,84 @@ async def health_server():
             return web.Response(text="OK - Gamebot @Gamusonbot is running 🎮")
         async def health(request):
             return web.Response(text="ok")
+        async def api_me(request):
+            # CORS
+            uid = request.query.get("user_id") or request.headers.get("X-User-Id")
+            try:
+                uid = int(uid) if uid else 0
+            except: uid = 0
+            # достаём юзера
+            row = db_get_user(uid) if uid else None
+            if row:
+                _, username, first_name, points, games, wins, last_daily = row
+                stats = db_get_referral_stats(uid)
+            else:
+                points, games, wins, stats = 0,0,0, {"count":0,"points":0,"pending":0,"active":0}
+            data = {"points": points, "games": games, "wins": wins, "referrals": stats}
+            return web.json_response(data, headers={"Access-Control-Allow-Origin":"*"})
+        async def api_slots(request):
+            try:
+                body = await request.json()
+            except: body = {}
+            uid = body.get("user_id") or request.query.get("user_id")
+            try: uid = int(uid)
+            except: return web.json_response({"error":"user_id required"}, status=400, headers={"Access-Control-Allow-Origin":"*"})
+            # антинакрутка: лимит 1 спин / 2 сек на юзера (простой in-memory)
+            now = __import__("time").time()
+            if not hasattr(api_slots, "last"):
+                api_slots.last = {}
+            last = api_slots.last.get(uid, 0)
+            if now - last < 2:
+                return web.json_response({"error":"slow down"}, status=429, headers={"Access-Control-Allow-Origin":"*"})
+            api_slots.last[uid] = now
+            # крутим как в bot.py
+            import random
+            val = random.randint(1,64)
+            if val == 64:
+                reward, res = 20, "💎 ДЖЕКПОТ 777! +20"
+            elif val in [1,22,43]:
+                reward, res = 10, "🎉 Выигрыш! +10"
+            elif val in [16,32,48]:
+                reward, res = 5, "🍀 +5"
+            else:
+                reward, res = 0, "😢 Мимо..."
+            # начисляем
+            # ensure user exists
+            try:
+                # upsert minimal
+                con = _db()
+                cur = con.cursor()
+                cur.execute("SELECT user_id FROM users WHERE user_id=?", (uid,))
+                if not cur.fetchone():
+                    cur.execute("INSERT INTO users (user_id, username, first_name, created_at) VALUES (?,?,?,?)", (uid, "", "", __import__("datetime").datetime.now().isoformat()))
+                    con.commit()
+                con.close()
+            except: pass
+            db_add_points(uid, reward, game_inc=1, win_inc=1 if reward>0 else 0)
+            # достаём новый баланс
+            pts = db_get_points(uid)
+            return web.json_response({"value": val, "reward": reward, "text": res, "points": pts}, headers={"Access-Control-Allow-Origin":"*"})
+        async def options_handler(request):
+            return web.Response(headers={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, X-User-Id"})
         app = web.Application()
         app.router.add_get("/", handle)
         app.router.add_get("/health", health)
+        app.router.add_get("/api/me", api_me)
+        app.router.add_post("/api/slots", api_slots)
+        app.router.add_route("OPTIONS", "/api/me", options_handler)
+        app.router.add_route("OPTIONS", "/api/slots", options_handler)
+        # WebApp статика (без неона, джунгли+золото)
+        try:
+            import pathlib as _pl
+            webapp_dir = _pl.Path(__file__).parent / "webapp"
+            if webapp_dir.exists():
+                app.router.add_static("/app/", path=str(webapp_dir), show_index=True)
+                async def webapp_index(request):
+                    return web.FileResponse(str(webapp_dir / "index.html"))
+                app.router.add_get("/app", webapp_index)
+                # also root /app without slash
+        except Exception as e:
+            log.warning(f"webapp static fail: {e}")
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", HEALTH_PORT)
