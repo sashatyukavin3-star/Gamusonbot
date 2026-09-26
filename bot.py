@@ -1800,6 +1800,27 @@ def main():
     except Exception as e:
         log.warning(f"JobQueue не запущен (нужен APScheduler): {e} — автопостинг через /post вручную")
 
+    # keepalive — чтобы Render free не засыпал (пинг каждые 5 мин + getMe)
+    try:
+        async def keep_alive(context):
+            try:
+                await context.bot.get_me()
+                try:
+                    import aiohttp
+                    async with aiohttp.ClientSession() as sess:
+                        async with sess.get("https://gamusonbot.onrender.com/health", timeout=10) as r:
+                            await r.text()
+                        async with sess.get("https://gamusonbot.onrender.com/", timeout=10) as r2:
+                            await r2.text()
+                except: pass
+                log.info("keepalive ping ok")
+            except Exception as e:
+                log.warning(f"keepalive fail: {e}")
+        jq.run_repeating(keep_alive, interval=300, first=60, name="keepalive")
+        log.info("keepalive каждые 5 мин включен")
+    except Exception as e:
+        log.warning(f"keepalive не завелся: {e}")
+
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), text_router))
 
