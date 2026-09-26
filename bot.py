@@ -360,6 +360,42 @@ def force_sub_kb():
         [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
     ])
 
+# --- ПЕРЕВОД на русский для постов ---
+import re as _re
+_cyr = _re.compile(r"[а-яА-ЯёЁ]")
+async def translate_ru(text: str) -> str:
+    if not text or _cyr.search(text):
+        return text  # уже русский
+    # пробуем HF Helsinki, fallback Qwen
+    try:
+        from huggingface_hub import InferenceClient
+        import os
+        tok = os.getenv("HF_TOKEN", "")
+        if tok:
+            # 1) Helsinki
+            try:
+                client = InferenceClient(token=tok, provider="hf-inference")
+                out = client.translation(model="Helsinki-NLP/opus-mt-en-ru", text=text[:400])
+                # out is TranslationOutput or str
+                tr = out.translation_text if hasattr(out, "translation_text") else str(out)
+                if tr and len(tr.strip())>5:
+                    return tr.strip()
+            except: pass
+            # 2) Qwen fallback
+            try:
+                client2 = InferenceClient(token=tok, provider="featherless-ai")
+                resp = client2.chat.completions.create(
+                    model="Qwen/Qwen2.5-7B-Instruct",
+                    messages=[{"role":"system","content":"Переведи точно на русский, без пояснений, сохрани цифры и термины."},
+                              {"role":"user","content": text[:400]}],
+                    max_tokens=120, temperature=0.3)
+                tr2 = resp.choices[0].message.content.strip()
+                if tr2:
+                    return tr2
+            except: pass
+    except: pass
+    return text
+
 async def send_force_sub(update, context):
     text = (
         f"🚀 Чтобы использовать бота, подпишись на наш канал:\n"
@@ -543,6 +579,11 @@ def dice_kb():
 # --- ХЭНДЛЕРЫ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # ставим Mini App кнопку для этого юзера (фикс для Render — default не ставится)
+    try:
+        from telegram import MenuButtonWebApp, WebAppInfo
+        await context.bot.set_chat_menu_button(chat_id=user.id, menu_button=MenuButtonWebApp(text="🎰 Играть", web_app=WebAppInfo(url="https://gamusonbot.onrender.com/app/index.html")))
+    except: pass
     # force sub check (админов пропускаем)
     if user.id not in ADMIN_IDS:
         if not await is_user_subscribed(context.bot, user.id):
@@ -611,6 +652,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        from telegram import MenuButtonWebApp, WebAppInfo
+        await context.bot.set_chat_menu_button(chat_id=update.effective_user.id, menu_button=MenuButtonWebApp(text="🎰 Играть", web_app=WebAppInfo(url="https://gamusonbot.onrender.com/app/index.html")))
+    except: pass
     if update.effective_user.id not in ADMIN_IDS:
         if not await is_user_subscribed(context.bot, update.effective_user.id):
             await send_force_sub(update, context)
@@ -1301,6 +1346,11 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
             if "ведьмак" in t.lower() or "witcher" in t.lower():
                 chosen = (t,l,d); break
         title, link, desc = chosen if chosen else random.choice(items)
+        # переводим на русский если английский
+        try:
+            title = await translate_ru(title)
+            desc = await translate_ru(desc)
+        except: pass
         short_title = title if len(title) < 90 else title[:87]+"..."
         src_name = src.split("/")[2] if src else "RSS"
         if "ведьмак" in title.lower() or "witcher" in title.lower():
@@ -1371,6 +1421,10 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
 
     if items:
         title, link, desc = random.choice(items)
+        try:
+            title = await translate_ru(title)
+            desc = await translate_ru(desc)
+        except: pass
         short_title = title if len(title) < 85 else title[:82]+"..."
         src_name = src.split("/")[2] if src else "Cointelegraph"
         # делаем понятнее: заголовок + суть + ссылка + цены
@@ -1417,6 +1471,10 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
         items, src = await fetch_any_rss(RSS_CRYPTO, limit=4)
     if items and random.random() < 0.7:
         title, link, desc = random.choice(items)
+        try:
+            title = await translate_ru(title)
+            desc = await translate_ru(desc)
+        except: pass
         short_title = title if len(title) < 80 else title[:77]+"..."
         src_name = src.split("/")[2] if src else "Cointelegraph"
         caption = (
@@ -1562,7 +1620,7 @@ async def generate_hunter_reply(user_text: str) -> str:
     try:
         from huggingface_hub import InferenceClient
         import os
-        token = os.getenv("HF_TOKEN", "hf_aAiJuRdzMAZqPIGmNPLeVbihqODBwHFlsbU")
+        token = os.getenv("HF_TOKEN", "")
         if token:
             client = InferenceClient(token=token)
             # пробуем Qwen чат
