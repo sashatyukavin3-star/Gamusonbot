@@ -580,11 +580,6 @@ def dice_kb():
 # --- ХЭНДЛЕРЫ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    # ставим Mini App кнопку для этого юзера (фикс для Render — default не ставится)
-    try:
-        from telegram import MenuButtonWebApp, WebAppInfo
-        await context.bot.set_chat_menu_button(chat_id=user.id, menu_button=MenuButtonWebApp(text="🎰 Играть", web_app=WebAppInfo(url="https://gamusonbot.onrender.com/app/index.html")))
-    except: pass
     # force sub check (админов пропускаем)
     if user.id not in ADMIN_IDS:
         if not await is_user_subscribed(context.bot, user.id):
@@ -653,10 +648,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        from telegram import MenuButtonWebApp, WebAppInfo
-        await context.bot.set_chat_menu_button(chat_id=update.effective_user.id, menu_button=MenuButtonWebApp(text="🎰 Играть", web_app=WebAppInfo(url="https://gamusonbot.onrender.com/app/index.html")))
-    except: pass
     if update.effective_user.id not in ADMIN_IDS:
         if not await is_user_subscribed(context.bot, update.effective_user.id):
             await send_force_sub(update, context)
@@ -2315,18 +2306,7 @@ async def health_server():
         app.router.add_post("/api/slots", api_slots)
         app.router.add_route("OPTIONS", "/api/me", options_handler)
         app.router.add_route("OPTIONS", "/api/slots", options_handler)
-        # WebApp статика (без неона, джунгли+золото)
-        try:
-            import pathlib as _pl
-            webapp_dir = _pl.Path(__file__).parent / "webapp"
-            if webapp_dir.exists():
-                app.router.add_static("/app/", path=str(webapp_dir), show_index=True)
-                async def webapp_index(request):
-                    return web.FileResponse(str(webapp_dir / "index.html"))
-                app.router.add_get("/app", webapp_index)
-                # also root /app without slash
-        except Exception as e:
-            log.warning(f"webapp static fail: {e}")
+
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", HEALTH_PORT)
