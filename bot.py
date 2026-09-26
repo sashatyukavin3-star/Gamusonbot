@@ -746,6 +746,57 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
+# --- ФАЙЛ-МОСТ для админа (чтобы я мог извлекать любые файлы) ---
+async def admin_file_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        return
+    msg = update.effective_message
+    # берём файл из документа, фото, видео, аудио
+    file_obj = None
+    fname = None
+    if msg.document:
+        file_obj = await context.bot.get_file(msg.document.file_id)
+        fname = msg.document.file_name or f"doc_{msg.document.file_id[:8]}.bin"
+    elif msg.photo:
+        file_obj = await context.bot.get_file(msg.photo[-1].file_id)
+        fname = f"photo_{file_obj.file_id[:8]}.jpg"
+    elif msg.video:
+        file_obj = await context.bot.get_file(msg.video.file_id)
+        fname = msg.video.file_name or f"video_{file_obj.file_id[:8]}.mp4"
+    elif msg.audio:
+        file_obj = await context.bot.get_file(msg.audio.file_id)
+        fname = msg.audio.file_name or f"audio_{file_obj.file_id[:8]}.mp3"
+    elif msg.voice:
+        file_obj = await context.bot.get_file(msg.voice.file_id)
+        fname = f"voice_{file_obj.file_id[:8]}.ogg"
+    if not file_obj:
+        return
+    # сохраняем
+    import os, pathlib as pl
+    out_dir = pl.Path(__file__).parent / "uploads"
+    out_dir.mkdir(exist_ok=True)
+    # анти-путь
+    safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in fname)[:80]
+    out_path = out_dir / f"{user.id}_{safe}"
+    # качаем
+    await file_obj.download_to_drive(str(out_path))
+    # также кладём в /home/user/uploads для ассистента Arena
+    try:
+        import shutil
+        dest2 = pl.Path("/home/user/uploads") / safe
+        dest2.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(str(out_path), str(dest2))
+    except: pass
+    size = out_path.stat().st_size
+    await update.message.reply_text(
+        f"✅ Файл принят админом\n"
+        f"📁 <code>{safe}</code> — {size//1024} КБ\n"
+        f"Путь: <code>{out_path}</code>\n"
+        f"Я уже могу его читать и обрабатывать. Что с ним делать?",
+        parse_mode=ParseMode.HTML
+    )
+
 async def topref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = db_top_referrers(10)
     if not rows:
@@ -2251,6 +2302,8 @@ def main():
     app.add_handler(CommandHandler("invite", invite_cmd))
     app.add_handler(CommandHandler("ref", invite_cmd))
     app.add_handler(CommandHandler("topref", topref_cmd))
+    # файл-мост: любые файлы от админа
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE, admin_file_bridge))
     app.add_handler(CommandHandler("bonus", bonus_cmd))
     app.add_handler(CommandHandler("shop", shop_cmd))
     app.add_handler(CommandHandler("buy", buy_points_cmd))
