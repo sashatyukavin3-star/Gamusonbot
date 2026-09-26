@@ -1040,19 +1040,8 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         prompt_title = "CONTROL Resonant Silent Hill Townfall Witcher 3 Remastered gaming"
         src_name = "календарь"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
-    # СВОЙ ГЕНЕРАТОР: Qwen/Qwen-Image с охотником, fallback на фото из источника
+    # ТОЛЬКО ФОТО ИЗ ИСТОЧНИКА (без ИИ)
     bg_url = None
-    # свой генератор — главный
-    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, jungle ruins, photorealistic, highly detailed, 8k, sharp focus"
-    own_prompt = f"{hunter_base}, video game news art about {prompt_title}, epic cinematic"
-    own_path = await get_own_image(own_prompt)
-    if own_path:
-        await post_photo_to_channel(context, own_path, caption, kb)
-        try:
-            await auto_comment_under_post(context, 0, "gaming")
-        except: pass
-        return
-    # fallback на фото из источника
     low_title = title.lower() if 'title' in locals() else ""
     if "ведьмак" in low_title or "witcher" in low_title:
         bg_url = "https://cdn.akamai.steamstatic.com/steam/apps/292030/header.jpg"
@@ -1060,11 +1049,10 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         try:
             bg_url = await fetch_og_image(link)
         except: pass
-    if not bg_url:
-        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
-        prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
-        bg_url = ai_image_url(prompt)
-    await post_photo_to_channel(context, bg_url, caption, kb)
+    if bg_url:
+        await post_photo_to_channel(context, bg_url, caption, kb)
+    else:
+        await post_to_channel(context, caption, kb)
     try:
         await auto_comment_under_post(context, 0, "gaming")
     except: pass
@@ -1113,24 +1101,16 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = sanitize_prompt("Bitcoin Ethereum crypto chart futuristic")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
-    # СВОЙ ГЕНЕРАТОР для крипты
-    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, news studio, pointing at Bitcoin chart, photorealistic, highly detailed"
-    own_prompt = f"{hunter_base}, crypto news art about {prompt_title}, neon trading chart"
-    own_path = await get_own_image(own_prompt)
-    if own_path:
-        await post_photo_to_channel(context, own_path, caption, kb)
-        try:
-            await auto_comment_under_post(context, 0, "crypto")
-        except: pass
-        return
+    # ТОЛЬКО ФОТО ИЗ ИСТОЧНИКА (без ИИ)
     bg_url = None
     try:
         if 'link' in locals() and link:
             bg_url = await fetch_og_image(link)
     except: pass
-    if not bg_url:
-        bg_url = "https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=1024"
-    await post_photo_to_channel(context, bg_url, caption, kb)
+    if bg_url:
+        await post_photo_to_channel(context, bg_url, caption, kb)
+    else:
+        await post_to_channel(context, caption, kb)
     try:
         await auto_comment_under_post(context, 0, "crypto")
     except: pass
@@ -1164,16 +1144,7 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = "Hamster Kombat hamsters Bitcoin gamepad, tokenized deposits"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Играть и заработать", url="https://t.me/Gamusonbot?start=gamefi")]])
-    # СВОЙ ГЕНЕРАТОР для GameFi
-    hunter_base = "thin lanky angry hunter in camo ushanka with Russian double-headed eagle emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, photorealistic, highly detailed"
-    own_prompt = f"{hunter_base}, GameFi news about {prompt_title}, bright Telegram game"
-    own_path = await get_own_image(own_prompt)
-    if own_path:
-        await post_photo_to_channel(context, own_path, caption, kb)
-        try:
-            await auto_comment_under_post(context, 0, "gamefi")
-        except: pass
-        return
+    # ТОЛЬКО ФОТО ИЗ ИСТОЧНИКА (без ИИ)
     bg_url = None
     try:
         if 'link' in locals() and link:
@@ -1181,17 +1152,11 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     except: pass
     if bg_url:
         await post_photo_to_channel(context, bg_url, caption, kb)
-        try:
-            await auto_comment_under_post(context, 0, "gamefi")
-        except: pass
     else:
-        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, cartoon"
-        prompt = f"{hunter}, GameFi play to earn news about {prompt_title}, bright Telegram game, 4k"
-        photo = ai_image_url(prompt)
-        await post_photo_to_channel(context, photo, caption, kb)
-        try:
-            await auto_comment_under_post(context, 0, "gamefi")
-        except: pass
+        await post_to_channel(context, caption, kb)
+    try:
+        await auto_comment_under_post(context, 0, "gamefi")
+    except: pass
 
 async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     rows = db_top(3)
@@ -1205,10 +1170,8 @@ async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
             txt += f"{medals[i-1]} {name} — <b>{pts} pts</b>\n"
         txt += "\nХочешь в топ? Играй → @Gamusonbot /start и забирай +50 в /bonus каждый день!"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Ворваться в топ", url="https://t.me/Gamusonbot?start=top")]])
-    hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding golden trophy 1ST PLACE with Bitcoin, confetti, podium"
-    prompt = f"{hunter}, esports trophy golden cup celebration gaming leaderboard bright 4k"
-    photo = ai_image_url(prompt)
-    await post_photo_to_channel(context, photo, txt, kb)
+    # ТОП — без ИИ, текст + можно сток-фото если нужно (сейчас просто текст чтобы без ИИ)
+    await post_to_channel(context, txt, kb)
     try:
         await auto_comment_under_post(context, 0, "top")
     except: pass
