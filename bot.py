@@ -1635,10 +1635,17 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_setdiscussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global DISCUSSION_CHAT_ID_RUNTIME
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ Только для админа")
-        return
     chat = update.effective_chat
+    # проверка: либо глобальный админ, либо админ этого чата
+    is_global = is_admin(update.effective_user.id)
+    is_chat_admin = False
+    try:
+        m = await context.bot.get_chat_member(chat.id, update.effective_user.id)
+        is_chat_admin = m.status in ("administrator","creator")
+    except: pass
+    if not (is_global or is_chat_admin):
+        await update.message.reply_text("⛔ Только для админа (нужны права админа в этой группе)")
+        return
     # если вызвано в группе — привязываем эту группу
     if chat.type in ("group","supergroup"):
         DISCUSSION_CHAT_ID_RUNTIME = chat.id
