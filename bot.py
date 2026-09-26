@@ -747,6 +747,12 @@ async def fetch_rss_titles(url, limit=3):
         log.warning(f"RSS fetch failed {url}: {e}")
         return []
 
+def ai_image_url(prompt, w=1024, h=1024):
+    # Pollinations - бесплатный генератор без ключа, бот сам генерит картинки по промпту
+    import urllib.parse
+    p = urllib.parse.quote(prompt[:300])
+    return f"https://image.pollinations.ai/prompt/{p}?width={w}&height={h}&model=flux&nologo=true&seed={random.randint(1,999999)}"
+
 async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup=None):
     try:
         await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
@@ -759,13 +765,21 @@ async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup
         except Exception as e2:
             log.error(f"Channel fallback failed: {e2}")
 
+async def post_photo_to_channel(context, photo_url, caption, reply_markup=None):
+    try:
+        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        log.info(f"Photo posted to {CHANNEL_USERNAME}")
+    except Exception as e:
+        log.error(f"Photo post failed: {e}, fallback to text")
+        await post_to_channel(context, caption, reply_markup)
+
 async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
-    # 09:00 Frankfurt — гейминг новости
+    # 09:00 Frankfurt — гейминг новости + AI картинка
     titles = await fetch_rss_titles("https://dtf.ru/rss/all", limit=3)
     if not titles:
         titles = [("GTA 6 перенесли, но фанаты в ожидании", ""), ("Steam установил рекорд онлайна", ""), ("Новый трейлер Hollow Knight", "")]
     t = random.choice(titles)
-    text = (
+    caption = (
         f"🎮 <b>Новости гейминга</b>\n\n"
         f"🔥 <b>{t[0]}</b>\n"
         f"{t[1]}\n\n"
@@ -773,14 +787,17 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Хочешь поинты? Играй в @Gamusonbot → /start и забирай подарки в /shop!"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
-    await post_to_channel(context, text, kb)
+    # AI картинка по новости
+    prompt = f"video game news art, {t[0]}, epic game scene, cinematic, 4k, vibrant"
+    photo = ai_image_url(prompt)
+    await post_photo_to_channel(context, photo, caption, kb)
 
 async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     titles = await fetch_rss_titles("https://cointelegraph.com/rss", limit=3)
     if not titles:
         titles = [("BTC держит $68k — быки в деле", ""), ("ETH обновил максимум по TVL", ""), ("Новый дроп от LayerZero", "")]
     t = random.choice(titles)
-    text = (
+    caption = (
         f"💰 <b>Крипта сегодня</b>\n\n"
         f"📈 <b>{t[0]}</b>\n"
         f"{t[1]}\n\n"
@@ -788,10 +805,12 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         f"💎 Зарабатывай Stars в @Gamusonbot → /shop меняй поинты на подарки!"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
-    await post_to_channel(context, text, kb)
+    prompt = f"crypto news art, {t[0]}, Bitcoin Ethereum chart, futuristic, neon, 4k"
+    photo = ai_image_url(prompt)
+    await post_photo_to_channel(context, photo, caption, kb)
 
 async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
-    text = (
+    caption = (
         f"🚀 <b>GameFi находка дня</b>\n\n"
         f"🎯 <b>Новая P2E игра</b> — играй и зарабатывай прямо в Telegram!\n"
         f"• Без вложений, выплаты в Stars/крипте\n"
@@ -800,7 +819,9 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
         f"🎁 /shop — магазин за поинты • 💎 /buy — купить поинты за Stars"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Играть и заработать", url="https://t.me/Gamusonbot?start=gamefi")]])
-    await post_to_channel(context, text, kb)
+    prompt = "GameFi play to earn game, cute hamster hunter with Bitcoin, bright, Telegram game, 4k, cartoon"
+    photo = ai_image_url(prompt)
+    await post_photo_to_channel(context, photo, caption, kb)
 
 async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     rows = db_top(3)
@@ -814,7 +835,10 @@ async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
             txt += f"{medals[i-1]} {name} — <b>{pts} pts</b>\n"
         txt += "\nХочешь в топ? Играй → @Gamusonbot /start и забирай +50 в /bonus каждый день!"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Ворваться в топ", url="https://t.me/Gamusonbot?start=top")]])
-    await post_to_channel(context, txt, kb)
+    # AI картинка для топа — кубок
+    prompt = "esports trophy, golden cup, confetti, celebration, gaming leaderboard, bright, 4k"
+    photo = ai_image_url(prompt)
+    await post_photo_to_channel(context, photo, txt, kb)
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
