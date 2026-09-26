@@ -1,7 +1,7 @@
 CHANNEL_USERNAME = "@gamefi_hunters"
 CHANNEL_ID = -1003642138077  # КриптоКатика
 CHANNEL_TITLE = "КриптоКатика | GameFi Hunters"
-DISCUSSION_CHAT_ID = None  # привяжется через /setdiscussion в группе обсуждений
+DISCUSSION_CHAT_ID = -1003843208022  # привяжется через /setdiscussion в группе обсуждений
 
 # ID админа для ручного постинга
 ADMIN_IDS = [8206258615]

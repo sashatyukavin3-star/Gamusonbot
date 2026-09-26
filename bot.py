@@ -1818,7 +1818,11 @@ async def discussion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except: pass
         return
     discussion_handler.user_last[user.id] = now
-    # --- cooldown 15 сек антиспам ---
+    # --- глобальный cooldown 15 сек антиспам на чат ---
+    last = HUNTER_COOLDOWN.get(chat.id, 0)
+    if now - last < 15:
+        return
+    HUNTER_COOLDOWN[chat.id] = now
     if random.random() > 0.75 and len(text) < 5:
         return
     # генерируем ответ охотника
@@ -2493,12 +2497,12 @@ def main():
     try:
         import datetime as dt
         jq = app.job_queue
-        # Раз в 2 часа = 12 постов/сутки (00,02,04,06,08,10,12,14,16,18,20,22 UTC)
-        for t, fn in [(0,autopost_gaming),(2,autopost_crypto),(4,autopost_gamefi),(6,autopost_top),
-                      (8,autopost_gaming),(10,autopost_crypto),(12,autopost_gamefi),(14,autopost_top),
-                      (16,autopost_gaming),(18,autopost_crypto),(20,autopost_gamefi),(22,autopost_top)]:
-            jq.run_daily(fn, time=dt.time(t,0), name=f"{fn.__name__}_{t:02d}")
-        log.info("Автопостинг в канал @gamefi_hunters запланирован 12 постов/день (каждые 2 ч)")
+        # Каждый час = 24 поста/сутки (00-23 UTC) — чередит gaming/crypto/gamefi/top
+        seq = [autopost_gaming, autopost_crypto, autopost_gamefi, autopost_top]
+        for h in range(24):
+            fn = seq[h % 4]
+            jq.run_daily(fn, time=dt.time(h,0), name=f"{fn.__name__}_{h:02d}")
+        log.info("Автопостинг в канал @gamefi_hunters запланирован 24 поста/день (каждый час)")
     except Exception as e:
         log.warning(f"JobQueue не запущен (нужен APScheduler): {e} — автопостинг через /post вручную")
 
@@ -2522,8 +2526,8 @@ def main():
         log.info("keepalive каждые 5 мин включен")
         # Мира автопост каждые 6 часов (как живой человек)
         try:
-            jq.run_repeating(mira_autopost, interval=21600, first=3600, name="mira_autopost")
-            log.info("mira autopost каждые 6ч включен")
+            jq.run_repeating(mira_autopost, interval=3600, first=600, name="mira_autopost")
+            log.info("mira autopost каждый час включен")
         except: pass
     except Exception as e:
         log.warning(f"keepalive не завелся: {e}")
