@@ -17,6 +17,7 @@ import html
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 from dotenv import load_dotenv
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -832,6 +833,99 @@ def sanitize_prompt(title: str) -> str:
     # режем длинные заголовки для промпта
     return title[:80]
 
+HUNTER_STICKER = Path(__file__).parent / "hunter_sticker.png"
+# fallback to /home/user version if not in gamebot dir
+if not HUNTER_STICKER.exists():
+    alt = Path("/home/user/hunter_sticker.png")
+    if alt.exists():
+        HUNTER_STICKER = alt
+
+async def fetch_og_image(url: str):
+    try:
+        import aiohttp
+        headers={"User-Agent":"Mozilla/5.0 (GameFi Hunters bot)"}
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers, timeout=10) as r:
+                html_text = await r.text()
+        import re
+        m = re.search(r'<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
+        if not m:
+            m = re.search(r'<meta[^>]+content=[\"\']([^\"\']+)[\"\'][^>]+property=[\"\']og:image[\"\']', html_text, re.I)
+        if m:
+            og = m.group(1).strip()
+            # fix protocol-relative
+            if og.startswith("//"):
+                og = "https:" + og
+            return og
+        # fallback enclosure in RSS already handled
+    except Exception as e:
+        log.warning(f"og fetch fail {url}: {e}")
+    return None
+
+def create_hybrid_image(bg_url: str, title: str, subtitle: str, out_path: str = "/tmp/hybrid.jpg"):
+    try:
+        import requests, io
+        headers={"User-Agent":"Mozilla/5.0"}
+        # try bg_url, else fallback to generic
+        try:
+            r = requests.get(bg_url, headers=headers, timeout=12)
+            r.raise_for_status()
+            bg = Image.open(io.BytesIO(r.content)).convert("RGBA")
+        except Exception as e:
+            log.warning(f"bg download fail {bg_url}: {e}")
+            # fallback gradient
+            bg = Image.new("RGBA", (1024,1024), (18,18,40,255))
+        bg = ImageOps.fit(bg, (1024,1024), method=Image.LANCZOS, centering=(0.5,0.5))
+        # overlay banners fully opaque to hide underlying text
+        overlay = Image.new("RGBA", (1024,1024), (0,0,0,0))
+        d = ImageDraw.Draw(overlay)
+        d.rectangle([0,0,1024,150], fill=(0,0,0,255))
+        d.rectangle([0,1024-90,1024,1024], fill=(0,0,0,255))
+        bg = Image.alpha_composite(bg, overlay)
+        # hunter sticker
+        try:
+            hunter = Image.open(HUNTER_STICKER).convert("RGBA")
+            hunter = hunter.resize((380,380), Image.LANCZOS)
+            bg.paste(hunter, (1024-400, 1024-420), mask=hunter)
+        except Exception as e:
+            log.warning(f"hunter sticker fail: {e}")
+        d = ImageDraw.Draw(bg)
+        try:
+            font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 38)
+            font_sub = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+            font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        except:
+            font_title = ImageFont.load_default()
+            font_sub = font_title
+            font_small = font_title
+        def wrap(text, font, max_width):
+            words=text.split()
+            lines=[]; cur=""
+            for w in words:
+                test=cur+" "+w if cur else w
+                bbox=d.textbbox((0,0), test, font=font)
+                if bbox[2]-bbox[0] > max_width:
+                    lines.append(cur); cur=w
+                else:
+                    cur=test
+            if cur: lines.append(cur)
+            return lines[:3]
+        lines = wrap(title, font_title, 980)
+        y=18
+        for line in lines:
+            d.text((20,y), line, fill=(255,215,0), font=font_title, stroke_width=2, stroke_fill=(0,0,0))
+            bbox=d.textbbox((0,0), line, font=font_title)
+            y+= bbox[3]-bbox[1]+4
+        d.text((20, y+8), subtitle[:95], fill=(255,255,255), font=font_sub)
+        d.text((20,1024-55), "GAMEFI HUNTERS  @gamefi_hunters", fill=(255,215,0), font=font_small)
+        d.text((1024-260,1024-55), "🎮 @Gamusonbot", fill=(255,255,255), font=font_small)
+        bg.convert("RGB").save(out_path, "JPEG", quality=92)
+        return out_path
+    except Exception as e:
+        log.exception(f"hybrid create fail: {e}")
+        return None
+
+
 async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup=None):
     try:
         await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
@@ -845,8 +939,13 @@ async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup
             log.error(f"Channel fallback failed: {e2}")
 
 async def post_photo_to_channel(context, photo_url, caption, reply_markup=None):
+    # hybrid: if photo_url is a local file path, send as file
     try:
-        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        if isinstance(photo_url, str) and os.path.exists(photo_url):
+            with open(photo_url, "rb") as f:
+                await context.bot.send_photo(chat_id=CHANNEL_ID, photo=f, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        else:
+            await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         log.info(f"Photo posted to {CHANNEL_USERNAME}")
     except Exception as e:
         log.error(f"Photo post failed: {e}, fallback to text")
@@ -896,11 +995,36 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         prompt_title = "CONTROL Resonant Silent Hill Townfall Witcher 3 Remastered gaming"
         src_name = "календарь"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
-    # AI картинка с охотником-маскотом (тот самый худой злюка в ушанке)
-    hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
-    prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
-    photo = ai_image_url(prompt)
-    await post_photo_to_channel(context, photo, caption, kb)
+    # ГИБРИД: реальный арт новости + охотник-стикер
+    bg_url = None
+    # приоритет — чистый арт Ведьмака из Steam если новость про Ведьмака
+    low_title = title.lower() if 'title' in locals() else ""
+    if "ведьмак" in low_title or "witcher" in low_title:
+        bg_url = "https://cdn.akamai.steamstatic.com/steam/apps/292030/header.jpg"
+    else:
+        # пробуем взять og:image из статьи
+        try:
+            bg_url = await fetch_og_image(link)
+        except: pass
+        if not bg_url:
+            # fallback polling image
+            hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
+            prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
+            bg_url = ai_image_url(prompt)
+            await post_photo_to_channel(context, bg_url, caption, kb)
+            return
+    # создаем гибрид: заголовок + подзаголовок из desc
+    subtitle = desc[:90] if 'desc' in locals() and desc else "Новости гейминга • @gamefi_hunters"
+    if "ведьмак" in low_title or "witcher" in low_title:
+        subtitle = "CDPR подтвердили • Обзоры 28.09 • Не нужно покупать заново"
+    out = f"/tmp/hybrid_gaming_{int(__import__('time').time())}.jpg"
+    hybrid = create_hybrid_image(bg_url, title if len(title)<60 else title[:57]+"...", subtitle, out)
+    # fallback если не получилось
+    if not hybrid or not __import__('os').path.exists(hybrid):
+        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
+        prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
+        hybrid = ai_image_url(prompt)
+    await post_photo_to_channel(context, hybrid, caption, kb)
 
 async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     # 11:00 UTC — реальные крипто-новости + живые цены CoinGecko
@@ -946,10 +1070,22 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = sanitize_prompt("Bitcoin Ethereum crypto chart futuristic")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
-    hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on shoulder, holding microphone GAMEFI HUNTERS, pointing at Bitcoin chart, BTC coins floating, news studio"
-    prompt = f"{hunter}, crypto news about {prompt_title}, neon trading chart, 4k, cartoon"
-    photo = ai_image_url(prompt)
-    await post_photo_to_channel(context, photo, caption, kb)
+    # ГИБРИД крипта
+    bg_url = None
+    try:
+        if 'link' in locals() and link:
+            bg_url = await fetch_og_image(link)
+    except: pass
+    if not bg_url:
+        bg_url = "https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=1024"
+    out = f"/tmp/hybrid_crypto_{int(__import__('time').time())}.jpg"
+    subtitle_crypto = price_line.strip().replace("\n"," • ")[:90]
+    hybrid = create_hybrid_image(bg_url, title if 'title' in locals() and len(title)<55 else (title[:52]+"..." if 'title' in locals() else "Крипта сегодня"), subtitle_crypto if subtitle_crypto else (desc[:60] if 'desc' in locals() else "BTC ETH SOL"), out)
+    if not hybrid or not __import__('os').path.exists(hybrid):
+        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on shoulder, holding microphone GAMEFI HUNTERS, pointing at Bitcoin chart, BTC coins floating, news studio"
+        prompt = f"{hunter}, crypto news about {prompt_title}, neon trading chart, 4k, cartoon"
+        hybrid = ai_image_url(prompt)
+    await post_photo_to_channel(context, hybrid, caption, kb)
 
 async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     # 15:00 UTC — реальные GameFi/P2E новости + полезность
