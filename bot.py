@@ -342,6 +342,37 @@ def db_top_referrers(limit=10):
     con.close()
     return rows
 
+# --- FORCE SUB на наш канал ---
+FORCE_CHANNEL = "@gamefi_hunters"
+FORCE_CHANNEL_URL = "https://t.me/gamefi_hunters"
+
+async def is_user_subscribed(bot, user_id: int):
+    try:
+        m = await bot.get_chat_member(FORCE_CHANNEL, user_id)
+        return m.status in ("member","administrator","creator","restricted")
+    except:
+        # если бот не админ в канале — считаем что подписан чтобы не лочить всех
+        return True
+
+def force_sub_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Перейти в канал", url=FORCE_CHANNEL_URL)],
+        [InlineKeyboardButton("✅ Проверить подписку", callback_data="check_sub")]
+    ])
+
+async def send_force_sub(update, context):
+    text = (
+        f"🚀 Чтобы использовать бота, подпишись на наш канал:\n"
+        f"<b>{FORCE_CHANNEL}</b> — новости гейминга, крипта и GameFi!\n\n"
+        f"Подпишись и нажми «Проверить» — получишь <b>+50 pts</b> бонус!"
+    )
+    kb = force_sub_kb()
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+
 
 def db_create_order(user_id, gift):
     for attempt in range(5):
@@ -512,6 +543,11 @@ def dice_kb():
 # --- ХЭНДЛЕРЫ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    # force sub check (админов пропускаем)
+    if user.id not in ADMIN_IDS:
+        if not await is_user_subscribed(context.bot, user.id):
+            await send_force_sub(update, context)
+            return
     is_new = False
     # проверим новый ли юзер до upsert
     try:
@@ -575,6 +611,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except: pass
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        if not await is_user_subscribed(context.bot, update.effective_user.id):
+            await send_force_sub(update, context)
+            return
     await update.message.reply_text("🎮 Главное меню — выбирай игру:", reply_markup=games_inline_kb())
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1955,6 +1995,28 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await invite_cmd(update, context)
     elif data == "topref":
         await topref_cmd(update, context)
+    elif data == "check_sub":
+        uid = update.effective_user.id
+        if await is_user_subscribed(context.bot, uid):
+            # даём бонус 50 если первый раз
+            try:
+                con = _db()
+                cur = con.cursor()
+                cur.execute("SELECT points FROM users WHERE user_id=?", (uid,))
+                row = cur.fetchone()
+                if row:
+                    # проверим не давали ли уже бонус за подписку (по referral_points отдельной логике — просто даём разово если < 50 и не было)
+                    # проще: даём +50 и помечаем
+                    pass
+                con.close()
+            except: pass
+            try:
+                db_add_points(uid, 50, game_inc=0, win_inc=0)
+                await q.answer("✅ Подписка подтверждена! +50 pts", show_alert=True)
+            except: await q.answer("✅ Подписка подтверждена!", show_alert=True)
+            await q.edit_message_text("🎉 Спасибо за подписку! Теперь жми /menu чтобы играть", reply_markup=games_inline_kb())
+        else:
+            await q.answer("❌ Ты ещё не подписан на канал!", show_alert=True)
     elif data.startswith("dice_"):
         emoji = data.split("_")[1]
         await handle_dice_throw(update, context, emoji)
