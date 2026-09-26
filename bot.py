@@ -1603,12 +1603,12 @@ def main():
     try:
         import datetime as dt
         jq = app.job_queue
-        # 07:00 UTC = 09:00 Frankfurt, 11:00 UTC=13:00, 15:00=17:00, 18:00=20:00
-        jq.run_daily(autopost_gaming, time=dt.time(7,0), name="gaming")
-        jq.run_daily(autopost_crypto, time=dt.time(11,0), name="crypto")
-        jq.run_daily(autopost_gamefi, time=dt.time(15,0), name="gamefi")
-        jq.run_daily(autopost_top, time=dt.time(18,0), name="top")
-        log.info("Автопостинг в канал @gamefi_hunters запланирован 4 поста/день")
+        # Раз в 2 часа = 12 постов/сутки (00,02,04,06,08,10,12,14,16,18,20,22 UTC)
+        for t, fn in [(0,autopost_gaming),(2,autopost_crypto),(4,autopost_gamefi),(6,autopost_top),
+                      (8,autopost_gaming),(10,autopost_crypto),(12,autopost_gamefi),(14,autopost_top),
+                      (16,autopost_gaming),(18,autopost_crypto),(20,autopost_gamefi),(22,autopost_top)]:
+            jq.run_daily(fn, time=dt.time(t,0), name=f"{fn.__name__}_{t:02d}")
+        log.info("Автопостинг в канал @gamefi_hunters запланирован 12 постов/день (каждые 2 ч)")
     except Exception as e:
         log.warning(f"JobQueue не запущен (нужен APScheduler): {e} — автопостинг через /post вручную")
 
