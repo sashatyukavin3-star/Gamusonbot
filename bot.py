@@ -127,6 +127,20 @@ def db_init():
         status TEXT DEFAULT 'pending',
         created_at TEXT
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referrer_id INTEGER,
+        referred_id INTEGER UNIQUE,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT,
+        rewarded_at TEXT
+    )""")
+    # миграция users: добавляем колонки если нет
+    for col, typ in [("referrer_id","INTEGER"),("referral_count","INTEGER DEFAULT 0"),("referral_points","INTEGER DEFAULT 0")]:
+        try:
+            cur.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
+        except: pass
     con.commit()
     con.close()
 
@@ -155,6 +169,15 @@ def db_upsert_user(user):
     con.close()
 
 def db_add_points(user_id, delta, game_inc=1, win_inc=0):
+    # антинакрутка: фиксируем games_played до
+    try:
+        con0 = _db()
+        cur0 = con0.cursor()
+        cur0.execute("SELECT games_played FROM users WHERE user_id=?", (user_id,))
+        r0 = cur0.fetchone()
+        was_zero = (r0 is None or (r0[0] or 0) == 0)
+        con0.close()
+    except: was_zero = False
     for attempt in range(5):
         try:
             con = _db()
@@ -164,7 +187,18 @@ def db_add_points(user_id, delta, game_inc=1, win_inc=0):
                         (delta, game_inc, win_inc, user_id))
             con.commit()
             con.close()
+            # если первая игра — активируем рефералку
+            if was_zero and game_inc>0:
+                try:
+                    # db_activate_referral уже определён ниже, но если ещё нет — отложим
+                    if 'db_activate_referral' in globals():
+                        res = db_activate_referral(user_id)
+                        # res = (True, reward, bonus) или False
+                        pass
+                except Exception as e:
+                    log.warning(f"referral activate fail: {e}")
             return
+
         except sqlite3.OperationalError as e:
             if "locked" in str(e) and attempt < 4:
                 import time; time.sleep(0.2*(attempt+1))
@@ -197,6 +231,117 @@ def db_get_points(user_id):
     row = cur.fetchone()
     con.close()
     return row[0] if row else 0
+
+# --- РЕФЕРАЛКА С АНТИНАКРУТКОЙ ---
+def db_add_referral(referrer_id: int, referred_id: int):
+    # антинакрутка: сам себя, бот, уже есть реферал, уже старый юзер, лимит 20/день
+    if referrer_id == referred_id:
+        return False, "self"
+    if referrer_id is None or referred_id is None:
+        return False, "invalid"
+    try:
+        con = _db()
+        cur = con.cursor()
+        # уже есть реферал?
+        cur.execute("SELECT referrer_id FROM users WHERE user_id=?", (referred_id,))
+        r = cur.fetchone()
+        if r and r[0] is not None:
+            con.close(); return False, "already_referred"
+        # не новый юзер? если уже играл — не даём
+        cur.execute("SELECT games_played FROM users WHERE user_id=?", (referred_id,))
+        gp = cur.fetchone()
+        if gp and gp[0] and gp[0] > 0:
+            con.close(); return False, "not_new"
+        # уже есть запись в referrals?
+        cur.execute("SELECT id FROM referrals WHERE referred_id=?", (referred_id,))
+        if cur.fetchone():
+            con.close(); return False, "dup"
+        # лимит 20 в день на реферера
+        cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND date(created_at)=date('now')", (referrer_id,))
+        cnt_day = cur.fetchone()[0] or 0
+        if cnt_day >= 20:
+            con.close(); return False, "limit_day"
+        # лимит 100 всего
+        cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?", (referrer_id,))
+        cnt_all = cur.fetchone()[0] or 0
+        if cnt_all >= 500:
+            con.close(); return False, "limit_all"
+        # проверка на накрутку по времени: если реферер только что создан (<5 мин) и уже пригласил >3 — подозрительно, но пока пропускаем
+        now = datetime.now().isoformat()
+        cur.execute("INSERT INTO referrals (referrer_id, referred_id, status, created_at) VALUES (?,?,?,?)", (referrer_id, referred_id, "pending", now))
+        cur.execute("UPDATE users SET referrer_id=? WHERE user_id=?", (referrer_id, referred_id))
+        con.commit(); con.close()
+        return True, "pending"
+    except Exception as e:
+        try: con.close()
+        except: pass
+        return False, str(e)
+
+def db_activate_referral(referred_id: int):
+    # вызывается когда приглашённый сыграл первую игру — начисляет рефереру
+    try:
+        con = _db()
+        cur = con.cursor()
+        cur.execute("SELECT referrer_id, status FROM referrals WHERE referred_id=?", (referred_id,))
+        row = cur.fetchone()
+        if not row: con.close(); return False
+        referrer_id, status = row
+        if status != "pending": con.close(); return False
+        # проверяем что приглашённый реально сыграл (games_played >=1)
+        cur.execute("SELECT games_played FROM users WHERE user_id=?", (referred_id,))
+        gp = cur.fetchone()
+        if not gp or (gp[0] or 0) < 1:
+            con.close(); return False
+        # антинакрутка: если реферер и реферал с одинаковым first_name/username подозрительно — но пока не баним, просто логируем
+        # начисляем: 100 base, 200 если акция (первые 7 дней после запуска реф системы — до 2026-10-03)
+        reward = 200 if datetime.now().date() < datetime(2026,10,3).date() else 100
+        # бонус за 5 друзей +500
+        cur.execute("UPDATE referrals SET status='active', rewarded_at=? WHERE referred_id=?", (datetime.now().isoformat(), referred_id))
+        cur.execute("UPDATE users SET points=points+?, referral_count=referral_count+1, referral_points=referral_points+? WHERE user_id=?", (reward, reward, referrer_id))
+        # проверка на бонус 5
+        cur.execute("SELECT referral_count FROM users WHERE user_id=?", (referrer_id,))
+        rc = (cur.fetchone() or [0])[0]
+        bonus_msg = None
+        if rc % 5 == 0 and rc > 0:
+            cur.execute("UPDATE users SET points=points+500 WHERE user_id=?", (referrer_id,))
+            bonus_msg = 500
+        con.commit(); con.close()
+        # уведомим реферера синхронно через Bot API (анти-спам: не чаще 1/5сек)
+        try:
+            import requests
+            bonus_txt = f" + бонус 500 за 5 друзей!" if bonus_msg else ""
+            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+                data={"chat_id": referrer_id,
+                      "text": f"🎉 Твой друг сыграл первую игру! Тебе +{reward} pts{bonus_txt}\nПриглашай ещё — /invite",
+                      "parse_mode": "HTML"}, timeout=5)
+        except: pass
+        return True, reward, bonus_msg
+    except Exception as e:
+        try: con.close()
+        except: pass
+        return False, str(e)
+
+def db_get_referral_stats(user_id: int):
+    con = _db()
+    cur = con.cursor()
+    cur.execute("SELECT referral_count, referral_points FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    rc, rp = (row or (0,0))
+    cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='pending'", (user_id,))
+    pending = (cur.fetchone() or [0])[0]
+    cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND status='active'", (user_id,))
+    active = (cur.fetchone() or [0])[0]
+    con.close()
+    return {"count": rc or 0, "points": rp or 0, "pending": pending, "active": active}
+
+def db_top_referrers(limit=10):
+    con = _db()
+    cur = con.cursor()
+    cur.execute("SELECT user_id, username, first_name, referral_count, referral_points FROM users WHERE referral_count>0 ORDER BY referral_count DESC, referral_points DESC LIMIT ?", (limit,))
+    rows = cur.fetchall()
+    con.close()
+    return rows
+
 
 def db_create_order(user_id, gift):
     for attempt in range(5):
@@ -278,6 +423,27 @@ async def send_gift_raw(bot, chat_id, gift_id):
                 raise Exception(j.get("description", "sendGift failed"))
             return j["result"]
 
+def referral_share_kb(user_id: int):
+    link = f"https://t.me/Gamusonbot?start=r{user_id}"
+    share = f"https://t.me/share/url?url={link}&text=Я+выиграл+в+GameFi+Hunters!+6+игр+и+подарки+Telegram+—+присоединяйся!"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Поделиться победой +200", url=share)],
+        [InlineKeyboardButton("👥 Мой инвайт", callback_data="invite"), InlineKeyboardButton("🎮 Ещё игра", callback_data="menu")]
+    ])
+
+async def send_win_share(update, context, reward: int):
+    try:
+        user_id = update.effective_user.id
+        link = f"https://t.me/Gamusonbot?start=r{user_id}"
+        share = f"https://t.me/share/url?url={link}&text=Я+выиграл+{reward}+pts+в+GameFi+Hunters!+6+игр+и+подарки+—+залетай!"
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"👥 <b>Хочешь ещё +200?</b> Поделись победой — друг перейдёт по твоей ссылке и сыграет 1 игру, ты получишь <b>+200 pts</b>!\n<code>{link}</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Поделиться", url=share)], [InlineKeyboardButton("👥 /invite", callback_data="invite")]])
+        )
+    except: pass
+
 # --- КЛАВИАТУРЫ ---
 def main_menu_kb():
     kb = [
@@ -346,7 +512,38 @@ def dice_kb():
 # --- ХЭНДЛЕРЫ ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    is_new = False
+    # проверим новый ли юзер до upsert
+    try:
+        con = _db()
+        cur = con.cursor()
+        cur.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,))
+        is_new = cur.fetchone() is None
+        con.close()
+    except: is_new = True
     db_upsert_user(user)
+    # --- рефералка: обработка диплинка ---
+    ref_msg = ""
+    if context.args:
+        # поддерживаем r12345, ref_12345, 12345
+        raw = context.args[0]
+        m = re.match(r"^(?:r|ref_)?(\d+)$", raw)
+        if m:
+            try:
+                ref_id = int(m.group(1))
+                if ref_id != user.id and is_new:
+                    ok, reason = db_add_referral(ref_id, user.id)
+                    if ok:
+                        ref_msg = "\n\n👥 Тебя пригласил охотник! Сыграй 1 игру — и он получит <b>+200 поинтов</b> (акция до 03.10)!"
+                        # уведомим реферера
+                        try:
+                            await context.bot.send_message(ref_id, f"🎉 По твоей ссылке зашёл {user.first_name or 'друг'} (@{user.username or '—'})! Как только он сыграет 1 игру — ты получишь <b>+200 pts</b>", parse_mode=ParseMode.HTML)
+                        except: pass
+                    else:
+                        if reason not in ("already_referred","self","not_new"):
+                            ref_msg = ""
+            except Exception as e:
+                log.warning(f"referral start fail: {e}")
     name = user.first_name or "друг"
     text = (
         f"Привет, {name}! 👋\n\n"
@@ -360,12 +557,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 За победы даю <b>поинты</b> — они идут в рейтинг.\n"
         f"🎁 Магазин: меняй поинты на <b>Stars и подарки Telegram</b> в /shop!\n"
         f"💎 Не хватает? Купи поинты за ⭐ в /buy\n"
-        f"🎁 Не забудь забрать <b>ежедневный бонус</b>!\n\n"
+        f"🎁 Не забудь забрать <b>ежедневный бонус</b>!{ref_msg}\n\n"
         f"Жми кнопку ниже, чтобы начать:"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML,
                                     reply_markup=main_menu_kb())
     await update.message.reply_text("🎮 Выбери игру или загляни в магазин:", reply_markup=games_inline_kb())
+    # быстрый доступ к рефке
+    try:
+        await update.message.reply_text(
+            "👥 <b>Хочешь халявные поинты?</b> Пригласи друга — +200 за каждого (акция)!\n"
+            f"Твоя ссылка: <code>https://t.me/Gamusonbot?start=r{user.id}</code>\n"
+            "Жми /invite чтобы видеть прогресс",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📤 Поделиться", url=f"https://t.me/share/url?url=https://t.me/Gamusonbot?start=r{user.id}&text=Зарубись+со+мной+в+GameFi+Hunters+—+6+игр+и+подарки+Telegram!")]])
+        )
+    except: pass
 
 async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎮 Главное меню — выбирай игру:", reply_markup=games_inline_kb())
@@ -380,6 +587,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/buy — 💎 купить поинты за Stars\n"
         "/profile — твой профиль и поинты\n"
         "/top — топ-10 игроков\n"
+        "/invite — 👥 пригласи друга +200 pts (акция)\n"
+        "/topref — 🏆 топ по приглашениям\n"
         "/bonus — ежедневный бонус +50\n"
         "/help — эта справка\n"
         "/admin — 👑 админка (только для админа)\n\n"
@@ -423,6 +632,52 @@ async def profile_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await target.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+
+async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db_upsert_user(user)
+    stats = db_get_referral_stats(user.id)
+    link = f"https://t.me/Gamusonbot?start=r{user.id}"
+    share_url = f"https://t.me/share/url?url={link}&text=Я+фармлю+поинты+в+GameFi+Hunters+—+6+игр,+подарки+Telegram+за+поинты!+Присоединяйся+и+получим+бонусы!"
+    # прогресс до бонуса 5
+    need = 5 - (stats['count'] % 5) if stats['count']%5!=0 else 5
+    bonus_info = f"\n🎁 Бонус <b>+500 pts</b> за каждых 5 друзей! До бонуса: <b>{need}</b>" if stats['count']<500 else ""
+    text = (
+        f"👥 <b>Пригласи друга — получи +200 поинтов</b> (акция до 03.10, потом +100)\n\n"
+        f"🔗 Твоя ссылка:\n<code>{link}</code>\n\n"
+        f"📊 Статистика:\n"
+        f"• Приглашено: <b>{stats['count']}</b> (активных: {stats['active']}, ожидают игры: {stats['pending']})\n"
+        f"• Заработано с рефералов: <b>{stats['points']} pts</b>{bonus_info}\n\n"
+        f"🏆 Топ пригласивших: /topref\n"
+        f"💡 Друг должен сыграть хотя бы 1 игру — тогда ты получишь награду (анти-накрутка: сам себя и ботов не засчитывает, 20/день лимит)\n"
+        f"📤 Жми «Поделиться» и зови охотников!"
+    )
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Поделиться ссылкой", url=share_url)],
+        [InlineKeyboardButton("🏆 Топ рефереров", callback_data="topref"), InlineKeyboardButton("👤 Профиль", callback_data="profile")]
+    ])
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+
+async def topref_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = db_top_referrers(10)
+    if not rows:
+        txt = "🏆 Топ рефереров пока пуст — стань первым! /invite"
+    else:
+        lines = ["🏆 <b>Топ-10 охотников по приглашениям</b>\n"]
+        for i,(uid, uname, fname, cnt, pts) in enumerate(rows,1):
+            name = f"@{uname}" if uname else (fname or f"ID{uid}")
+            name = name.replace("<","").replace(">","")
+            medal = ["🥇","🥈","🥉"][i-1] if i<=3 else f"{i}."
+            lines.append(f"{medal} {name} — <b>{cnt}</b> друз., +{pts} pts")
+        txt = "\n".join(lines) + "\n\nХочешь в топ? /invite"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("👥 Мой инвайт", callback_data="invite"), InlineKeyboardButton("🎮 Играть", callback_data="menu")]])
+    if update.callback_query:
+        await update.callback_query.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
+    else:
+        await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
 async def top_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = db_top(10)
@@ -1418,13 +1673,16 @@ async def handle_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"🎉 <b>Верно! Это {target}</b>!\n"
             f"💰 +{reward} поинтов! Осталось попыток: {tries}\n"
-            f"Сыграем ещё?",
+            f"Сыграем ещё? 👥 Пригласи друга — +200!",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Ещё раз", callback_data="game_guess"),
-                 InlineKeyboardButton("🎮 Меню", callback_data="menu")]
+                 InlineKeyboardButton("🎮 Меню", callback_data="menu")],
+                [InlineKeyboardButton("📤 Поделиться победой", url=f"https://t.me/share/url?url=https://t.me/Gamusonbot?start=r{update.effective_user.id}&text=Я+выиграл+в+GameFi+Hunters!+Присоединяйся+—+6+игр+и+подарки!")]
             ])
         )
+        try: await send_win_share(update, context, reward)
+        except: pass
         return
     if tries <= 0:
         context.user_data["guess_active"] = False
@@ -1476,6 +1734,9 @@ async def handle_rps(update: Update, context: ContextTypes.DEFAULT_TYPE, choice:
         f"Ещё раунд?"
     )
     await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=rps_kb())
+    if win_map[choice] == bot_choice:
+        try: await send_win_share(update, context, 5)
+        except: pass
 
 # --- МОНЕТКА ---
 async def start_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1498,6 +1759,9 @@ async def handle_coin(update: Update, context: ContextTypes.DEFAULT_TYPE, choice
         res = f"😢 Выпал <b>{em[result]}</b> — не угадал..."
     text = res + "\n\nСыграем ещё?"
     await update.callback_query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=coin_kb())
+    if win:
+        try: await send_win_share(update, context, 5)
+        except: pass
 
 # --- ВИКТОРИНА ---
 async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1534,6 +1798,9 @@ async def handle_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE, idx: i
         f"🧠 {q['q']}\n\n{res}",
         parse_mode=ParseMode.HTML, reply_markup=kb
     )
+    if idx == correct:
+        try: await send_win_share(update, context, 7)
+        except: pass
 
 # --- СЛОТЫ / DICE ---
 async def start_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1571,6 +1838,9 @@ async def start_slots(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🎮 Меню", callback_data="menu")]
         ])
     )
+    if reward>0:
+        try: await send_win_share(update, context, reward)
+        except: pass
 
 async def handle_dice_picker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🎲 <b>Выбери кубик для броска</b>\nTelegram сам генерирует рандом — честно и красиво!"
@@ -1611,6 +1881,9 @@ async def handle_dice_throw(update: Update, context: ContextTypes.DEFAULT_TYPE, 
              InlineKeyboardButton("🎮 Меню", callback_data="menu")]
         ])
     )
+    if win:
+        try: await send_win_share(update, context, reward)
+        except: pass
 
 # --- CALLBACK ROUTER ---
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1678,6 +1951,10 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_slots(update, context)
     elif data == "game_dice":
         await handle_dice_picker(update, context)
+    elif data == "invite":
+        await invite_cmd(update, context)
+    elif data == "topref":
+        await topref_cmd(update, context)
     elif data.startswith("dice_"):
         emoji = data.split("_")[1]
         await handle_dice_throw(update, context, emoji)
@@ -1774,6 +2051,9 @@ def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("profile", profile_cmd))
     app.add_handler(CommandHandler("top", top_cmd))
+    app.add_handler(CommandHandler("invite", invite_cmd))
+    app.add_handler(CommandHandler("ref", invite_cmd))
+    app.add_handler(CommandHandler("topref", topref_cmd))
     app.add_handler(CommandHandler("bonus", bonus_cmd))
     app.add_handler(CommandHandler("shop", shop_cmd))
     app.add_handler(CommandHandler("buy", buy_points_cmd))
