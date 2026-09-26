@@ -995,36 +995,22 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         prompt_title = "CONTROL Resonant Silent Hill Townfall Witcher 3 Remastered gaming"
         src_name = "календарь"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
-    # ГИБРИД: реальный арт новости + охотник-стикер
+    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА (без стикера)
     bg_url = None
-    # приоритет — чистый арт Ведьмака из Steam если новость про Ведьмака
     low_title = title.lower() if 'title' in locals() else ""
     if "ведьмак" in low_title or "witcher" in low_title:
         bg_url = "https://cdn.akamai.steamstatic.com/steam/apps/292030/header.jpg"
     else:
-        # пробуем взять og:image из статьи
         try:
             bg_url = await fetch_og_image(link)
         except: pass
-        if not bg_url:
-            # fallback polling image
-            hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
-            prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
-            bg_url = ai_image_url(prompt)
-            await post_photo_to_channel(context, bg_url, caption, kb)
-            return
-    # создаем гибрид: заголовок + подзаголовок из desc
-    subtitle = desc[:90] if 'desc' in locals() and desc else "Новости гейминга • @gamefi_hunters"
-    if "ведьмак" in low_title or "witcher" in low_title:
-        subtitle = "CDPR подтвердили • Обзоры 28.09 • Не нужно покупать заново"
-    out = f"/tmp/hybrid_gaming_{int(__import__('time').time())}.jpg"
-    hybrid = create_hybrid_image(bg_url, title if len(title)<60 else title[:57]+"...", subtitle, out)
-    # fallback если не получилось
-    if not hybrid or not __import__('os').path.exists(hybrid):
+    # если не нашли og:image — пробуем enclosure/media из RSS уже было, fallback на polling
+    if not bg_url:
+        # fallback: если нет картинки — шлем без фото (текст) или polling
         hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on back, jungle ruins background, holding Dragon Lore rifle, BTC coins floating"
         prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
-        hybrid = ai_image_url(prompt)
-    await post_photo_to_channel(context, hybrid, caption, kb)
+        bg_url = ai_image_url(prompt)
+    await post_photo_to_channel(context, bg_url, caption, kb)
 
 async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     # 11:00 UTC — реальные крипто-новости + живые цены CoinGecko
@@ -1070,7 +1056,7 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = sanitize_prompt("Bitcoin Ethereum crypto chart futuristic")
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
-    # ГИБРИД крипта
+    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА
     bg_url = None
     try:
         if 'link' in locals() and link:
@@ -1078,14 +1064,7 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     except: pass
     if not bg_url:
         bg_url = "https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=1024"
-    out = f"/tmp/hybrid_crypto_{int(__import__('time').time())}.jpg"
-    subtitle_crypto = price_line.strip().replace("\n"," • ")[:90]
-    hybrid = create_hybrid_image(bg_url, title if 'title' in locals() and len(title)<55 else (title[:52]+"..." if 'title' in locals() else "Крипта сегодня"), subtitle_crypto if subtitle_crypto else (desc[:60] if 'desc' in locals() else "BTC ETH SOL"), out)
-    if not hybrid or not __import__('os').path.exists(hybrid):
-        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch on shoulder, holding microphone GAMEFI HUNTERS, pointing at Bitcoin chart, BTC coins floating, news studio"
-        prompt = f"{hunter}, crypto news about {prompt_title}, neon trading chart, 4k, cartoon"
-        hybrid = ai_image_url(prompt)
-    await post_photo_to_channel(context, hybrid, caption, kb)
+    await post_photo_to_channel(context, bg_url, caption, kb)
 
 async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     # 15:00 UTC — реальные GameFi/P2E новости + полезность
@@ -1116,10 +1095,20 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
         )
         prompt_title = "Hamster Kombat hamsters Bitcoin gamepad, tokenized deposits"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Играть и заработать", url="https://t.me/Gamusonbot?start=gamefi")]])
-    hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, cartoon"
-    prompt = f"{hunter}, GameFi play to earn news about {prompt_title}, bright Telegram game, 4k"
-    photo = ai_image_url(prompt)
-    await post_photo_to_channel(context, photo, caption, kb)
+    # ПРОСТО ФОТО ИЗ ИСТОЧНИКА для GameFi
+    bg_url = None
+    try:
+        if 'link' in locals() and link:
+            bg_url = await fetch_og_image(link)
+    except: pass
+    if bg_url:
+        await post_photo_to_channel(context, bg_url, caption, kb)
+    else:
+        # fallback polling if no image
+        hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, cartoon"
+        prompt = f"{hunter}, GameFi play to earn news about {prompt_title}, bright Telegram game, 4k"
+        photo = ai_image_url(prompt)
+        await post_photo_to_channel(context, photo, caption, kb)
 
 async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     rows = db_top(3)
