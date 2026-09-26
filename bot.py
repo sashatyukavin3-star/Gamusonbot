@@ -44,10 +44,21 @@ except ImportError:
     ADMIN_IDS = [8206258615]
 
 try:
-    from channel_config import CHANNEL_USERNAME, CHANNEL_ID
+    from channel_config import CHANNEL_USERNAME, CHANNEL_ID, DISCUSSION_CHAT_ID
 except ImportError:
-    CHANNEL_USERNAME = "@gamefi_hunters"
-    CHANNEL_ID = -1003642138077
+    try:
+        from channel_config import CHANNEL_USERNAME, CHANNEL_ID
+        DISCUSSION_CHAT_ID = getattr(__import__("channel_config"), "DISCUSSION_CHAT_ID", None)
+    except ImportError:
+        CHANNEL_USERNAME = "@gamefi_hunters"
+        CHANNEL_ID = -1003642138077
+        DISCUSSION_CHAT_ID = None
+if 'DISCUSSION_CHAT_ID' not in globals() or DISCUSSION_CHAT_ID is None:
+    try:
+        from channel_config import DISCUSSION_CHAT_ID as _DISC
+        DISCUSSION_CHAT_ID = _DISC
+    except:
+        DISCUSSION_CHAT_ID = None
 
 # --- CONFIG ---
 load_dotenv()
@@ -1037,6 +1048,9 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
     own_path = await get_own_image(own_prompt)
     if own_path:
         await post_photo_to_channel(context, own_path, caption, kb)
+        try:
+            await auto_comment_under_post(context, 0, "gaming")
+        except: pass
         return
     # fallback на фото из источника
     low_title = title.lower() if 'title' in locals() else ""
@@ -1051,6 +1065,9 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
         prompt = f"{hunter}, video game news art about {prompt_title}, epic, cinematic, cartoon, 4k"
         bg_url = ai_image_url(prompt)
     await post_photo_to_channel(context, bg_url, caption, kb)
+    try:
+        await auto_comment_under_post(context, 0, "gaming")
+    except: pass
 
 async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     # 11:00 UTC — реальные крипто-новости + живые цены CoinGecko
@@ -1102,6 +1119,9 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     own_path = await get_own_image(own_prompt)
     if own_path:
         await post_photo_to_channel(context, own_path, caption, kb)
+        try:
+            await auto_comment_under_post(context, 0, "crypto")
+        except: pass
         return
     bg_url = None
     try:
@@ -1111,6 +1131,9 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
     if not bg_url:
         bg_url = "https://images.unsplash.com/photo-1621761191319-c6fb62004040?w=1024"
     await post_photo_to_channel(context, bg_url, caption, kb)
+    try:
+        await auto_comment_under_post(context, 0, "crypto")
+    except: pass
 
 async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     # 15:00 UTC — реальные GameFi/P2E новости + полезность
@@ -1147,6 +1170,9 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     own_path = await get_own_image(own_prompt)
     if own_path:
         await post_photo_to_channel(context, own_path, caption, kb)
+        try:
+            await auto_comment_under_post(context, 0, "gamefi")
+        except: pass
         return
     bg_url = None
     try:
@@ -1155,11 +1181,17 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
     except: pass
     if bg_url:
         await post_photo_to_channel(context, bg_url, caption, kb)
+        try:
+            await auto_comment_under_post(context, 0, "gamefi")
+        except: pass
     else:
         hunter = "thin lanky angry hunter in camo ushanka with Russian emblem, GAMEFI HUNTERS patch, holding gamepad and Bitcoin, surrounded by hamsters, jungle ruins, cartoon"
         prompt = f"{hunter}, GameFi play to earn news about {prompt_title}, bright Telegram game, 4k"
         photo = ai_image_url(prompt)
         await post_photo_to_channel(context, photo, caption, kb)
+        try:
+            await auto_comment_under_post(context, 0, "gamefi")
+        except: pass
 
 async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     rows = db_top(3)
@@ -1177,6 +1209,9 @@ async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     prompt = f"{hunter}, esports trophy golden cup celebration gaming leaderboard bright 4k"
     photo = ai_image_url(prompt)
     await post_photo_to_channel(context, photo, txt, kb)
+    try:
+        await auto_comment_under_post(context, 0, "top")
+    except: pass
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -1188,6 +1223,193 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     func = m.get(arg.lower(), autopost_gaming)
     await func(context)
     await update.message.reply_text(f"✅ Пост {arg} отправлен в {CHANNEL_USERNAME}")
+
+
+async def cmd_setdiscussion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global DISCUSSION_CHAT_ID_RUNTIME
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    chat = update.effective_chat
+    # если вызвано в группе — привязываем эту группу
+    if chat.type in ("group","supergroup"):
+        DISCUSSION_CHAT_ID_RUNTIME = chat.id
+        await update.message.reply_text(f"✅ Чат обсуждений привязан: <code>{chat.id}</code>\nТеперь охотник будет отвечать тут.", parse_mode=ParseMode.HTML)
+        # пробуем сохранить в channel_config
+        try:
+            cfg_path = __import__("pathlib").Path(__file__).parent / "channel_config.py"
+            cfg = cfg_path.read_text(encoding="utf-8")
+            if "DISCUSSION_CHAT_ID" in cfg:
+                import re
+                cfg = re.sub(r"DISCUSSION_CHAT_ID\s*=.*", f"DISCUSSION_CHAT_ID = {chat.id}", cfg)
+            else:
+                cfg += f"\nDISCUSSION_CHAT_ID = {chat.id}\n"
+            cfg_path.write_text(cfg, encoding="utf-8")
+        except Exception as e:
+            print(f"save config fail: {e}")
+        return
+    # если в личке с аргументом
+    if context.args:
+        try:
+            cid = int(context.args[0])
+            DISCUSSION_CHAT_ID_RUNTIME = cid
+            await update.message.reply_text(f"✅ DISCUSSION_CHAT_ID = <code>{cid}</code> установлен", parse_mode=ParseMode.HTML)
+        except:
+            await update.message.reply_text("Использование: /setdiscussion  или  /setdiscussion -100123... (в личке)")
+        return
+    await update.message.reply_text("ℹ️ Зайди в группу обсуждений канала и напиши там /setdiscussion — привяжу её.\nИли в личке: /setdiscussion -100123456789")
+
+
+# --- КОММЕНТЫ: АВТООТВЕТЧИК ОХОТНИКА (всё вместе: троллит + FAQ + антиспам) ---
+# Скама/ссылки — удаляет, FAQ — помогает, остальное — отвечает охотник в стиле твоего худого злюки с ушанкой
+DISCUSSION_CHAT_ID_RUNTIME = DISCUSSION_CHAT_ID  # can be updated via /setdiscussion
+ANTI_SPAM_WARNINGS = {}  # user_id -> count
+HUNTER_COOLDOWN = {}  # chat_id -> last_reply_time
+
+FAQ_TRIGGERS = {
+    "как играть": "🎮 <b>Как играть:</b> жми /start → <b>Игры</b> → выбирай из 6 (Угадай число, КНБ, Викторина, Орел/Решка, Слоты, Кости). За каждую победу + поинты!\n\n👉 <a href=\"https://t.me/Gamusonbot?start=play\">Играть в @Gamusonbot</a>",
+    "правила": "📜 <b>Правила:</b> играй честно, не спамь. Поинты копятся и меняются на подарки Telegram в /shop. Топ обновляется ежедневно.\n👉 /help — все команды",
+    "топ": "🏆 <b>Топ охотников:</b> жми /top — смотри лидеров недели. Хочешь в топ — фарми поинты в играх!\n👉 /top",
+    "shop": "💎 <b>Магазин:</b> /shop — подарки Telegram за поинты (от 15⭐). Или купи поинты: /buy\n🎁 500–3800 поинтов = 💝🎁🎂🏆",
+    "звезд": "⭐ <b>Звезды/Stars:</b> покупай поинты в /buy или копи бесплатно играя. 1⭐ = ~35 поинтов. Оплата через Telegram Stars (XTR).",
+    "stars": "⭐ <b>Stars:</b> /buy — пакеты поинтов за Stars. Платишь звездами, получаешь поинты и берешь подарки в /shop.",
+    "выплат": "💸 <b>Выплаты:</b> поинты → подарки Telegram из /shop приходят мгновенно. Если не пришло — пиши @XYLIIVET",
+    "бонус": "🎁 <b>Бонус:</b> /bonus — ежедневный бонус раз в 24ч. Не пропусти!",
+    "профил": "👤 <b>Профиль:</b> /profile — твои поинты, игры, победы",
+    "помощ": "🆘 <b>Помощь:</b> /help — список команд, /shop — магазин, /top — лидеры",
+}
+
+HUNTER_PHRASES = [
+    "Хе-хе, нюх охотника не подвёл — ты прям в цель 🎯 А ну-ка покажи скилл в @Gamusonbot, зятек? 😏",
+    "Ушанка с гербом чует добычу! 🦅 За поинтами — в @Gamusonbot, там 6 игр и золотишко ждёт!",
+    "Эй, салага, хватит болтать — иди фарми поинты, я уже три шкуры снял пока ты пишешь 😤 → /start",
+    "Водопад шумит, джунгли шепчут: «играй в GameFi Hunters» 🌴💰 Не зевай, охотник!",
+    "Хитрый охотник одобряет твой коммент 👍 Но топ ждёт — /top глянь, обгонишь меня?",
+    "БТС-монетки падают с неба, а ты всё в чате? 😂 Жми /start и хватай свои!",
+    "Снайперка Dragon Lore нацелена на твой рекорд! Покажи что можешь в @Gamusonbot 🎯",
+    "Ха! Длинный нос чует — тут будущий чемпион 🏆 Давай, проверь в Викторине!",
+    "Орел и Решка ждут твою ставку, охотник! 💰 50/50 — рискнешь?",
+    "КНБ — камень-ножницы-бумага, но по-охотничьи! Порвёшь меня? → /start",
+]
+
+SPAM_PATTERNS = [
+    r"https?://", r"t\.me/", r"joinchat", r"\bказино\b", r"\bзаработок\b", r"\bинвест\b", r"\bкрипта\s*сигнал", r"\bдвой\s*топ\b",
+]
+SPAM_RE = re.compile("|".join(SPAM_PATTERNS), re.I)
+
+async def generate_hunter_reply(user_text: str) -> str:
+    # пытается через HF, иначе шаблон
+    prompt = f"Ты — худой злющий охотник в ушанке с гербом РФ, с длинным носом и хитрой улыбкой, держишь золотую снайперку Dragon Lore. Отвечай дерзко, с юмором, коротко (1-2 предложения), зазывай в @Gamusonbot где 6 игр и поинты→подарки. Коммент пользователя: {user_text[:300]}"
+    # 1) HF chat
+    try:
+        from huggingface_hub import InferenceClient
+        import os
+        token = os.getenv("HF_TOKEN", "hf_aAiJuRdzMAZqPIGmNPLeVbihqODBwHFlsbU")
+        if token:
+            client = InferenceClient(token=token)
+            # пробуем Qwen чат
+            try:
+                resp = client.chat_completion(
+                    model="Qwen/Qwen2.5-7B-Instruct",
+                    messages=[{"role":"system","content":"Ты — харизматичный охотник GameFi Hunters, отвечай дерзко и весело, коротко, зазывай в игру."},
+                              {"role":"user","content": prompt}],
+                    max_tokens=80,
+                    temperature=0.9,
+                )
+                text = resp.choices[0].message.content.strip()
+                if text:
+                    # добавь призыв если нет
+                    if "@Gamusonbot" not in text and "/start" not in text:
+                        text += " → @Gamusonbot 🎯"
+                    return text[:350]
+            except Exception as e:
+                # fallback text_generation
+                try:
+                    out = client.text_generation(model="Qwen/Qwen2.5-7B-Instruct", prompt=prompt, max_new_tokens=80, temperature=0.9)
+                    if out and isinstance(out, str) and len(out.strip())>10:
+                        return out.strip()[:350] + " → @Gamusonbot"
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return random.choice(HUNTER_PHRASES)
+
+async def discussion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+    if user.is_bot:
+        return
+    # только в группах/супергруппах (чат обсуждений)
+    if chat.type not in ("group","supergroup"):
+        return
+    # если DISCUSSION_CHAT_ID задан — только там
+    if DISCUSSION_CHAT_ID_RUNTIME and chat.id != DISCUSSION_CHAT_ID_RUNTIME:
+        return
+    text = msg.text or msg.caption or ""
+    text_low = text.lower()
+    # --- АНТИСПАМ ---
+    if SPAM_RE.search(text):
+        # админов не трогаем
+        if user.id not in ADMIN_IDS:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            cnt = ANTI_SPAM_WARNINGS.get(user.id, 0) + 1
+            ANTI_SPAM_WARNINGS[user.id] = cnt
+            try:
+                await context.bot.send_message(chat.id, f"🚫 {user.mention_html()} реклама/ссылки запрещены! ({cnt}/2)", parse_mode=ParseMode.HTML)
+                if cnt >= 2:
+                    await context.bot.ban_chat_member(chat.id, user.id)
+                    await context.bot.send_message(chat.id, f"🔨 {user.mention_html()} забанен за спам", parse_mode=ParseMode.HTML)
+                    ANTI_SPAM_WARNINGS.pop(user.id, None)
+            except Exception:
+                pass
+            return
+    # --- FAQ ---
+    for key, ans in FAQ_TRIGGERS.items():
+        if key in text_low:
+            try:
+                await msg.reply_text(ans, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            except Exception:
+                pass
+            return
+    # --- cooldown 5 сек на чат чтобы не флудить ---
+    now = datetime.now().timestamp()
+    last = HUNTER_COOLDOWN.get(chat.id, 0)
+    if now - last < 8:
+        return
+    HUNTER_COOLDOWN[chat.id] = now
+    # шанс ответа 70% чтобы не на каждое сообщение
+    if random.random() > 0.75 and len(text) < 5:
+        return
+    # генерируем ответ охотника
+    reply = await generate_hunter_reply(text or "привет")
+    try:
+        await msg.reply_text(reply, disable_web_page_preview=True)
+    except Exception as e:
+        log.warning(f"discussion reply fail: {e}")
+
+# авто-коммент под новым постом в канале (зовёт обсудить)
+async def auto_comment_under_post(context, channel_msg_id: int, post_type: str):
+    if not DISCUSSION_CHAT_ID_RUNTIME:
+        return
+    prompts = {
+        "gaming": "🎮 Обсудим гейминг-новость? Какая игра сейчас топ для вас? Пишите — охотник ответит! 👇",
+        "crypto": "💰 Что думаете про крипту сегодня? Холдите или фиксируете? Обсудим 👇",
+        "gamefi": "🚀 GameFi — хайп или будущее? Какая P2E игра кормит лучше? 👇",
+        "top": "🏆 Кто станет топ-охотником недели? Проверь /top и ворвись!",
+    }
+    txt = prompts.get(post_type, "💬 Что думаете, охотники? Пишите в комменты — отвечу лично 😏")
+    try:
+        # если пост переслан в группу обсуждений, он имеет message_thread_id = channel_msg_id
+        # пробуем отправить как reply в тред
+        await context.bot.send_message(chat_id=DISCUSSION_CHAT_ID_RUNTIME, text=txt)
+    except Exception as e:
+        log.warning(f"auto_comment fail: {e}")
 
 # --- ИГРЫ: УГАДАЙ ЧИСЛО ---
 async def start_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1595,6 +1817,9 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("give", admin_give_cmd))
     app.add_handler(CommandHandler("post", cmd_post))
+    app.add_handler(CommandHandler("setdiscussion", cmd_setdiscussion))
+    # комменты: охотник отвечает в группе обсуждений канала (только в группах)
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & (filters.TEXT | filters.CAPTION), discussion_handler))
 
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
@@ -1613,7 +1838,7 @@ def main():
         log.warning(f"JobQueue не запущен (нужен APScheduler): {e} — автопостинг через /post вручную")
 
     app.add_handler(CallbackQueryHandler(callback_router))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.TEXT & ~filters.COMMAND), text_router))
 
     app.add_error_handler(error_handler)
 
