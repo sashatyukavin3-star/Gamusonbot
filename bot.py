@@ -41,6 +41,12 @@ except ImportError:
     ]
     ADMIN_IDS = [8206258615]
 
+try:
+    from channel_config import CHANNEL_USERNAME, CHANNEL_ID
+except ImportError:
+    CHANNEL_USERNAME = "@gamefi_hunters"
+    CHANNEL_ID = -1003642138077
+
 # --- CONFIG ---
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN", "8652086324:AAEXTu3NS3Xl8G1NYrhYJmKF-bJnr-vtk8Q")
@@ -721,6 +727,106 @@ async def admin_give_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
+# --- КАНАЛ АВТОПОСТИНГ (GameFi Hunters @gamefi_hunters) ---
+async def fetch_rss_titles(url, limit=3):
+    """Простой парсер RSS без зависимостей"""
+    try:
+        import aiohttp, xml.etree.ElementTree as ET
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=10) as r:
+                txt = await r.text()
+        root = ET.fromstring(txt)
+        items = []
+        for item in root.findall(".//item")[:limit]:
+            title = item.findtext("title", "").strip()
+            link = item.findtext("link", "").strip()
+            if title:
+                items.append((title, link))
+        return items
+    except Exception as e:
+        log.warning(f"RSS fetch failed {url}: {e}")
+        return []
+
+async def post_to_channel(context: ContextTypes.DEFAULT_TYPE, text, reply_markup=None):
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+        log.info(f"Posted to {CHANNEL_USERNAME}")
+    except Exception as e:
+        log.error(f"Channel post failed: {e}")
+        # fallback на username
+        try:
+            await context.bot.send_message(chat_id=CHANNEL_USERNAME, text=text, parse_mode=ParseMode.HTML, reply_markup=reply_markup, disable_web_page_preview=True)
+        except Exception as e2:
+            log.error(f"Channel fallback failed: {e2}")
+
+async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
+    # 09:00 Frankfurt — гейминг новости
+    titles = await fetch_rss_titles("https://dtf.ru/rss/all", limit=3)
+    if not titles:
+        titles = [("GTA 6 перенесли, но фанаты в ожидании", ""), ("Steam установил рекорд онлайна", ""), ("Новый трейлер Hollow Knight", "")]
+    t = random.choice(titles)
+    text = (
+        f"🎮 <b>Новости гейминга</b>\n\n"
+        f"🔥 <b>{t[0]}</b>\n"
+        f"{t[1]}\n\n"
+        f"Как тебе новость? Пиши в комменты 👇\n\n"
+        f"🎯 Хочешь поинты? Играй в @Gamusonbot → /start и забирай подарки в /shop!"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Играть в боте", url="https://t.me/Gamusonbot?start=channel_gaming")]])
+    await post_to_channel(context, text, kb)
+
+async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
+    titles = await fetch_rss_titles("https://cointelegraph.com/rss", limit=3)
+    if not titles:
+        titles = [("BTC держит $68k — быки в деле", ""), ("ETH обновил максимум по TVL", ""), ("Новый дроп от LayerZero", "")]
+    t = random.choice(titles)
+    text = (
+        f"💰 <b>Крипта сегодня</b>\n\n"
+        f"📈 <b>{t[0]}</b>\n"
+        f"{t[1]}\n\n"
+        f"Что думаешь — лонг или шорт? 👇\n\n"
+        f"💎 Зарабатывай Stars в @Gamusonbot → /shop меняй поинты на подарки!"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("💎 Купить поинты", url="https://t.me/Gamusonbot?start=channel_crypto")]])
+    await post_to_channel(context, text, kb)
+
+async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        f"🚀 <b>GameFi находка дня</b>\n\n"
+        f"🎯 <b>Новая P2E игра</b> — играй и зарабатывай прямо в Telegram!\n"
+        f"• Без вложений, выплаты в Stars/крипте\n"
+        f"• Уже 10k игроков в @Gamusonbot\n\n"
+        f"👉 Заходи в бота, набивай поинты и меняй на подарки:\n"
+        f"🎁 /shop — магазин за поинты • 💎 /buy — купить поинты за Stars"
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🚀 Играть и заработать", url="https://t.me/Gamusonbot?start=gamefi")]])
+    await post_to_channel(context, text, kb)
+
+async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
+    rows = db_top(3)
+    if not rows:
+        txt = "🏆 <b>Топ пока пуст</b> — стань первым в @Gamusonbot! /start"
+    else:
+        txt = "🏆 <b>Топ-3 игроков дня в @Gamusonbot</b>\n\n"
+        medals = ["🥇","🥈","🥉"]
+        for i, (uname, fname, pts, wins, games) in enumerate(rows, 1):
+            name = f"@{uname}" if uname else (fname or f"Игрок {i}")
+            txt += f"{medals[i-1]} {name} — <b>{pts} pts</b>\n"
+        txt += "\nХочешь в топ? Играй → @Gamusonbot /start и забирай +50 в /bonus каждый день!"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎮 Ворваться в топ", url="https://t.me/Gamusonbot?start=top")]])
+    await post_to_channel(context, txt, kb)
+
+async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для админа")
+        return
+    # /post gaming|crypto|gamefi|top
+    arg = context.args[0] if context.args else "gaming"
+    m = {"gaming": autopost_gaming, "crypto": autopost_crypto, "gamefi": autopost_gamefi, "top": autopost_top}
+    func = m.get(arg.lower(), autopost_gaming)
+    await func(context)
+    await update.message.reply_text(f"✅ Пост {arg} отправлен в {CHANNEL_USERNAME}")
+
 # --- ИГРЫ: УГАДАЙ ЧИСЛО ---
 async def start_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_num = random.randint(1, 100)
@@ -1126,9 +1232,23 @@ def main():
     app.add_handler(CommandHandler("buy", buy_points_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("give", admin_give_cmd))
+    app.add_handler(CommandHandler("post", cmd_post))
 
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
+
+    # --- Автопостинг в канал ---
+    try:
+        import datetime as dt
+        jq = app.job_queue
+        # 07:00 UTC = 09:00 Frankfurt, 11:00 UTC=13:00, 15:00=17:00, 18:00=20:00
+        jq.run_daily(autopost_gaming, time=dt.time(7,0), name="gaming")
+        jq.run_daily(autopost_crypto, time=dt.time(11,0), name="crypto")
+        jq.run_daily(autopost_gamefi, time=dt.time(15,0), name="gamefi")
+        jq.run_daily(autopost_top, time=dt.time(18,0), name="top")
+        log.info("Автопостинг в канал @gamefi_hunters запланирован 4 поста/день")
+    except Exception as e:
+        log.warning(f"JobQueue не запущен (нужен APScheduler): {e} — автопостинг через /post вручную")
 
     app.add_handler(CallbackQueryHandler(callback_router))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
