@@ -1612,29 +1612,85 @@ async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
 
 async def ai_rewrite_post(raw_title: str, raw_desc: str, post_type: str) -> str:
     """Переписывает сырую новость в живой пост Охотника, без склипов/копипасты — 100% уникальный"""
-    import os, random
-    from huggingface_hub import InferenceClient
-    tok = os.getenv("HF_TOKEN","")
-    if not tok:
-        return raw_title
-    try:
-        client = InferenceClient(token=tok, provider="featherless-ai")
-        sys = (
+    import os, random, json, urllib.request
+    # --- MULTI-PROVIDER: пробуем мощнейшие бесплатные модели по очереди ---
+    # 1) Cerebras FREE (Qwen3-235B) если есть CEREBRAS_API_KEY
+    # 2) Groq FREE (Llama 3.3 70B / DeepSeek R1) если есть GROQ_API_KEY
+    # 3) OpenRouter FREE (DeepSeek V3 / Qwen3) если есть OPENROUTER_API_KEY
+    # 4) Google Gemini FREE если есть GOOGLE_API_KEY
+    # 5) Fallback HF Qwen2.5-72B
+    async def call_llm(sys_msg, user_msg, max_tokens=180):
+        # Cerebras FREE — Qwen3-235B
+        cere = os.getenv("CEREBRAS_API_KEY","")
+        if cere:
+            try:
+                import urllib.request, json
+                data = json.dumps({"model":"qwen-3-235b-a22b","messages":[{"role":"system","content":sys_msg},{"role":"user","content":user_msg}],"max_tokens":max_tokens,"temperature":0.9}).encode()
+                req = urllib.request.Request("https://api.cerebras.ai/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {cere}","Content-Type":"application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    j=json.loads(r.read().decode())
+                    txt=j["choices"][0]["message"]["content"].strip()
+                    if txt: return txt
+            except: pass
+        # Groq FREE — Llama 3.3 70B
+        groq = os.getenv("GROQ_API_KEY","")
+        if groq:
+            try:
+                data = json.dumps({"model":"llama-3.3-70b-versatile","messages":[{"role":"system","content":sys_msg},{"role":"user","content":user_msg}],"max_tokens":max_tokens,"temperature":0.9}).encode()
+                req = urllib.request.Request("https://api.groq.com/openai/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {groq}","Content-Type":"application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    j=json.loads(r.read().decode())
+                    txt=j["choices"][0]["message"]["content"].strip()
+                    if txt: return txt
+            except: pass
+        # OpenRouter FREE — DeepSeek V3 / Qwen3
+        opr = os.getenv("OPENROUTER_API_KEY","")
+        if opr:
+            try:
+                data = json.dumps({"model":"deepseek/deepseek-chat:free","messages":[{"role":"system","content":sys_msg},{"role":"user","content":user_msg}],"max_tokens":max_tokens,"temperature":0.9}).encode()
+                req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {opr}","Content-Type":"application/json","HTTP-Referer":"https://gamefi-hunters.local","X-Title":"GameFi Hunters"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    j=json.loads(r.read().decode())
+                    txt=j["choices"][0]["message"]["content"].strip()
+                    if txt: return txt
+            except: pass
+        # Google Gemini FREE — 1M context
+        gkey = os.getenv("GOOGLE_API_KEY","")
+        if gkey:
+            try:
+                import urllib.request, json, urllib.parse
+                payload=json.dumps({"contents":[{"parts":[{"text": sys_msg+"\n\n"+user_msg}]}],"generationConfig":{"maxOutputTokens":max_tokens,"temperature":0.9}}).encode()
+                url=f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gkey}"
+                req=urllib.request.Request(url, data=payload, headers={"Content-Type":"application/json"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    j=json.loads(r.read().decode())
+                    txt=j["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    if txt: return txt
+            except: pass
+        # Fallback HF Qwen2.5-72B
+        from huggingface_hub import InferenceClient
+        tok = os.getenv("HF_TOKEN","")
+        if tok:
+            try:
+                client = InferenceClient(token=tok, provider="featherless-ai")
+                resp = client.chat.completions.create(model="Qwen/Qwen2.5-72B-Instruct", messages=[{"role":"system","content":sys_msg},{"role":"user","content":user_msg}], max_tokens=max_tokens, temperature=0.9)
+                txt=resp.choices[0].message.content.strip()
+                if txt: return txt
+            except: pass
+        return ""
+    sys = (
             "Ты — Охотник, брутальный мужик-ведущий канала GameFi Hunters. "
             "Пиши ТОЛЬКО на русском, живо, по-мужски, без канцелярита. "
             "Задача: переписать новость своими словами, коротко, цепко, как будто рассказываешь братве в баре. "
             "Не копируй заголовок дословно, не вставляй склипы, сделай уникальный рерайт. "
             "1-2 коротких абзаца, добавь свой коммент охотника. Без хештегов."
         )
+    try:
         prompt = f"Тип: {post_type}\nЗаголовок: {raw_title}\nОписание: {raw_desc[:400]}\nПерепиши как живой пост охотника:"
-        resp = client.chat.completions.create(
-            model="Qwen/Qwen2.5-72B-Instruct",
-            messages=[{"role":"system","content": sys},{"role":"user","content": prompt}],
-            max_tokens=180, temperature=0.9
-        )
-        txt = resp.choices[0].message.content.strip()
-        # убираем кавычки если модель их добавила
-        return txt if len(txt)>20 else raw_title
+        txt = await call_llm(sys, prompt, max_tokens=180)
+        if txt and len(txt)>20:
+            return txt
+        return raw_title
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"ai_rewrite fail: {e}")
@@ -1749,6 +1805,41 @@ async def generate_hunter_reply(user_text: str) -> str:
                 import random as _rnd
                 need_ad = _rnd.random() < 0.25
                 sys = "Ты — Охотник, брутальный но дружелюбный мужик из GameFi Hunters, говори по-русски, коротко 1-2 предложения, с характером, чуть дерзко но по-доброму, используй эмодзи 🎯🏹🔥. Отвечай ТОЛЬКО на русском." + (" Иногда мягко позови в @Gamusonbot где 6 игр." if need_ad else "")
+                # multi-provider hunter reply — пробуем мощнейшие бесплатные
+                txt_reply = ""
+                # Cerebras FREE
+                try:
+                    import os, json, urllib.request
+                    cere = os.getenv("CEREBRAS_API_KEY","")
+                    if cere and not txt_reply:
+                        data=json.dumps({"model":"qwen-3-235b-a22b","messages":[{"role":"system","content":sys},{"role":"user","content":prompt}],"max_tokens":80,"temperature":0.85}).encode()
+                        req=urllib.request.Request("https://api.cerebras.ai/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {cere}","Content-Type":"application/json"})
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            j=json.loads(r.read().decode())
+                            txt_reply=j["choices"][0]["message"]["content"].strip()
+                except: pass
+                # Groq FREE
+                try:
+                    groq=os.getenv("GROQ_API_KEY","")
+                    if groq and not txt_reply:
+                        data=json.dumps({"model":"llama-3.3-70b-versatile","messages":[{"role":"system","content":sys},{"role":"user","content":prompt}],"max_tokens":80,"temperature":0.85}).encode()
+                        req=urllib.request.Request("https://api.groq.com/openai/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {groq}","Content-Type":"application/json"})
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            j=json.loads(r.read().decode())
+                            txt_reply=j["choices"][0]["message"]["content"].strip()
+                except: pass
+                # OpenRouter FREE
+                try:
+                    opr=os.getenv("OPENROUTER_API_KEY","")
+                    if opr and not txt_reply:
+                        data=json.dumps({"model":"deepseek/deepseek-chat:free","messages":[{"role":"system","content":sys},{"role":"user","content":prompt}],"max_tokens":80,"temperature":0.85}).encode()
+                        req=urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=data, headers={"Authorization":f"Bearer {opr}","Content-Type":"application/json","HTTP-Referer":"https://gamefi-hunters.local","X-Title":"GameFi Hunters"})
+                        with urllib.request.urlopen(req, timeout=10) as r:
+                            j=json.loads(r.read().decode())
+                            txt_reply=j["choices"][0]["message"]["content"].strip()
+                except: pass
+                if txt_reply:
+                    return txt_reply
                 resp = client.chat.completions.create(
                     model="Qwen/Qwen2.5-72B-Instruct",
                     messages=[{"role":"system","content": sys},
