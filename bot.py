@@ -386,7 +386,7 @@ async def translate_ru(text: str) -> str:
             try:
                 client2 = InferenceClient(token=tok, provider="featherless-ai")
                 resp = client2.chat.completions.create(
-                    model="Qwen/Qwen2.5-7B-Instruct",
+                    model="Qwen/Qwen2.5-72B-Instruct",
                     messages=[{"role":"system","content":"Переведи точно на русский, без пояснений, сохрани цифры и термины."},
                               {"role":"user","content": text[:400]}],
                     max_tokens=120, temperature=0.3)
@@ -1447,26 +1447,16 @@ async def autopost_gaming(context: ContextTypes.DEFAULT_TYPE):
             title = await translate_ru(title)
             desc = await translate_ru(desc)
         except: pass
-        short_title = title if len(title) < 90 else title[:87]+"..."
+        # живой рерайт от Охотника (мощная модель 72B) — без копипасты
+        hunter_text = await ai_rewrite_post(title, desc, "gaming")
         src_name = src.split("/")[2] if src else "RSS"
-        if "ведьмак" in title.lower() or "witcher" in title.lower():
-            caption = (
-                f"🎮 <b>Ведьмак 3 — ремастер будет бесплатным патчем!</b>\n\n"
-                f"🔥 CDPR подтвердили: {short_title}\n"
-                f"Обзоры — за сутки до релиза 29.09. Покупать заново не нужно, обновится текущая игра. Что внутри патча — пока секрет.\n"
-                f"🔗 <a href=\"{link}\">Читать на {src_name}</a>\n\n"
-                f"Ждёшь ремастер или уже закрыл 100%? 👇\n"
-                f"🎯 Фарми поинты → @Gamusonbot /start"
-            )
-        else:
-            caption = (
-                f"🎮 <b>Гейминг — коротко и по делу</b>\n\n"
-                f"🔥 <b>{short_title}</b>\n"
-                f"{desc}\n"
-                f"🔗 <a href=\"{link}\">Читать полностью на {src_name}</a>\n\n"
-                f"Что думаешь? 👇\n"
-                f"🎯 Фарми поинты → @Gamusonbot /start"
-            )
+        caption = (
+            f"🎮 <b>Охотник на связи</b>\n\n"
+            f"{hunter_text}\n\n"
+            f"🔗 <a href=\"{link}\">Читать полностью на {src_name}</a>\n\n"
+            f"Что скажешь, охотник? 👇\n"
+            f"🎯 Фарми поинты → @Gamusonbot /start"
+        )
         prompt_title = sanitize_prompt(title)
     else:
         # фолбэк — календарь сентября (реальные даты, не фейк)
@@ -1521,17 +1511,14 @@ async def autopost_crypto(context: ContextTypes.DEFAULT_TYPE):
             title = await translate_ru(title)
             desc = await translate_ru(desc)
         except: pass
-        short_title = title if len(title) < 85 else title[:82]+"..."
+        hunter_text = await ai_rewrite_post(title, desc, "crypto")
         src_name = src.split("/")[2] if src else "Cointelegraph"
-        # делаем понятнее: заголовок + суть + ссылка + цены
         caption = (
-            f"💰 <b>Крипта — главное за минуту</b>\n\n"
-            f"📈 <b>{short_title}</b>\n"
-            f"{desc}\n"
-            f"🔗 <a href=\"{link}\">Читать полностью</a>\n\n"
+            f"💰 <b>Крипта от Охотника</b>\n\n"
+            f"{hunter_text}\n\n"
             f"{price_line}"
-            f"<i>Источник: {src_name} + CoinGecko</i>\n"
-            f"Твой прогноз — рост или падение? 👇\n"
+            f"🔗 <a href=\"{link}\">Источник: {src_name}</a>\n"
+            f"Холдим или фиксим? 👇\n"
             f"💎 Меняй поинты на Stars → @Gamusonbot /shop"
         )
         prompt_title = sanitize_prompt(title)
@@ -1571,14 +1558,12 @@ async def autopost_gamefi(context: ContextTypes.DEFAULT_TYPE):
             title = await translate_ru(title)
             desc = await translate_ru(desc)
         except: pass
-        short_title = title if len(title) < 80 else title[:77]+"..."
+        hunter_text = await ai_rewrite_post(title, desc, "gamefi")
         src_name = src.split("/")[2] if src else "Cointelegraph"
         caption = (
-            f"🚀 <b>GameFi — находка дня</b>\n\n"
-            f"🎯 <b>{short_title}</b>\n"
-            f"{desc}\n"
-            f"🔗 {link}\n\n"
-            f"<i>Источник: {src_name}</i>\n"
+            f"🚀 <b>GameFi по-охотничьи</b>\n\n"
+            f"{hunter_text}\n\n"
+            f"🔗 <a href=\"{link}\">Источник: {src_name}</a>\n"
             f"👉 Фарми поинты в @Gamusonbot → /shop"
         )
         prompt_title = title
@@ -1624,6 +1609,36 @@ async def autopost_top(context: ContextTypes.DEFAULT_TYPE):
     try:
         await auto_comment_under_post(context, 0, "top")
     except: pass
+
+async def ai_rewrite_post(raw_title: str, raw_desc: str, post_type: str) -> str:
+    """Переписывает сырую новость в живой пост Охотника, без склипов/копипасты — 100% уникальный"""
+    import os, random
+    from huggingface_hub import InferenceClient
+    tok = os.getenv("HF_TOKEN","")
+    if not tok:
+        return raw_title
+    try:
+        client = InferenceClient(token=tok, provider="featherless-ai")
+        sys = (
+            "Ты — Охотник, брутальный мужик-ведущий канала GameFi Hunters. "
+            "Пиши ТОЛЬКО на русском, живо, по-мужски, без канцелярита. "
+            "Задача: переписать новость своими словами, коротко, цепко, как будто рассказываешь братве в баре. "
+            "Не копируй заголовок дословно, не вставляй склипы, сделай уникальный рерайт. "
+            "1-2 коротких абзаца, добавь свой коммент охотника. Без хештегов."
+        )
+        prompt = f"Тип: {post_type}\nЗаголовок: {raw_title}\nОписание: {raw_desc[:400]}\nПерепиши как живой пост охотника:"
+        resp = client.chat.completions.create(
+            model="Qwen/Qwen2.5-72B-Instruct",
+            messages=[{"role":"system","content": sys},{"role":"user","content": prompt}],
+            max_tokens=180, temperature=0.9
+        )
+        txt = resp.choices[0].message.content.strip()
+        # убираем кавычки если модель их добавила
+        return txt if len(txt)>20 else raw_title
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"ai_rewrite fail: {e}")
+        return raw_title
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -1735,7 +1750,7 @@ async def generate_hunter_reply(user_text: str) -> str:
                 need_ad = _rnd.random() < 0.25
                 sys = "Ты — Охотник, брутальный но дружелюбный мужик из GameFi Hunters, говори по-русски, коротко 1-2 предложения, с характером, чуть дерзко но по-доброму, используй эмодзи 🎯🏹🔥. Отвечай ТОЛЬКО на русском." + (" Иногда мягко позови в @Gamusonbot где 6 игр." if need_ad else "")
                 resp = client.chat.completions.create(
-                    model="Qwen/Qwen2.5-7B-Instruct",
+                    model="Qwen/Qwen2.5-72B-Instruct",
                     messages=[{"role":"system","content": sys},
                               {"role":"user","content": prompt}],
                     max_tokens=80,
@@ -1750,7 +1765,7 @@ async def generate_hunter_reply(user_text: str) -> str:
             except Exception as e:
                 # fallback text_generation
                 try:
-                    out = client.text_generation(model="Qwen/Qwen2.5-7B-Instruct", prompt=prompt, max_new_tokens=80, temperature=0.9)
+                    out = client.text_generation(model="Qwen/Qwen2.5-72B-Instruct", prompt=prompt, max_new_tokens=80, temperature=0.9)
                     if out and isinstance(out, str) and len(out.strip())>10:
                         return out.strip()[:350] + " → @Gamusonbot"
                 except Exception:
@@ -1880,7 +1895,7 @@ async def mira_autopost(context: ContextTypes.DEFAULT_TYPE):
         if tok and random.random()<0.5:
             client = InferenceClient(token=tok, provider="featherless-ai")
             resp = client.chat.completions.create(
-                model="Qwen/Qwen2.5-7B-Instruct",
+                model="Qwen/Qwen2.5-72B-Instruct",
                 messages=[{"role":"system","content":"Ты — Охотник, брутальный мужик из GameFi Hunters, пишешь короткий пост в чат охотников. Пиши ТОЛЬКО на русском, дерзко-дружелюбно, 1-2 предложения, с эмодзи 🎯🏹, как живой охотник, без рекламы."},
                           {"role":"user","content":"Придумай милый пост для чата: приветствие или вопрос к участникам, как будто ты соскучилась."}],
                 max_tokens=60, temperature=0.9)
